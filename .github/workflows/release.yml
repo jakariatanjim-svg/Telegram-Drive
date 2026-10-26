@@ -1,0 +1,636 @@
+name: "Release"
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0, v1.0.1
+
+permissions:
+  contents: read
+
+env:
+  RUST_TEST_THREADS: "4"
+
+jobs:
+  dependency-assurance:
+    name: Verify dependency security policy
+    uses: ./.github/workflows/dependency-assurance.yml
+    permissions:
+      contents: read
+
+  verify-release:
+    name: Verify release invariants
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            supporter-service/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev ffmpeg
+
+      - name: Install application dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Verify release tag, application version, and changelog
+        working-directory: app
+        run: npm run release:version:check -- --tag "$GITHUB_REF_NAME" --changelog ../CHANGELOG.md
+
+      - name: Run read-only release preflight
+        env:
+          TELEGRAM_DRIVE_SUPPORTER_SERVICE_URL: ${{ vars.SUPPORTER_SERVICE_URL }}
+          TELEGRAM_DRIVE_SUPPORTER_PUBLIC_KEY: ${{ vars.SUPPORTER_PUBLIC_KEY }}
+        run: |
+          node scripts/check-workflow-pins.cjs
+          node scripts/release-preflight.cjs
+
+
+      - name: Validate E2E-only testing policy and app security configuration
+        run: |
+          node scripts/check-rust-formatting.cjs
+          node scripts/check-test-policy.cjs
+          node scripts/check-app-security.cjs
+          node scripts/check-android-publication.cjs --tracked-only
+
+      - name: Install browser for end-to-end verification
+        working-directory: app
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser end-to-end journeys
+        working-directory: app
+        run: npm run test:e2e
+
+      - name: Validate locale resources
+        working-directory: app
+        run: npm run i18n:validate
+
+      - name: Build production frontend
+        working-directory: app
+        run: npm run build:verify
+
+      - name: Run native process and HTTP end-to-end journeys
+        working-directory: app/src-tauri
+        run: cargo test --locked --features native-e2e --test native_e2e
+
+      - name: Verify desktop package excludes test executables
+        run: node scripts/e2e/desktop-package.e2e.cjs
+
+      - name: Verify Rust formatting
+        working-directory: app/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Lint native release targets without warnings
+        working-directory: app/src-tauri
+        run: cargo clippy --locked --features native-e2e --lib --all-targets -- -D warnings
+
+      - name: Install supporter-service dependencies
+        working-directory: supporter-service
+        run: npm ci
+
+      - name: Verify supporter service
+        working-directory: supporter-service
+        run: |
+          npm run check
+          npm run test:e2e
+          npx wrangler deploy --dry-run
+
+      - name: Verify a Worker-issued supporter entitlement in the application
+        run: node --test scripts/e2e/supporter-token.e2e.mjs
+
+  create-release:
+    needs: [verify-release, dependency-assurance]
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+      prerelease: ${{ steps.release-policy.outputs.prerelease }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Validate tag policy and extract reviewed release notes
+        id: release-policy
+        run: |
+          node scripts/release-tag-policy.cjs --tag "$GITHUB_REF_NAME" --app-root app --changelog CHANGELOG.md --body-output release-body.md > release-policy.json
+          node -e 'const fs=require("node:fs");const policy=JSON.parse(fs.readFileSync("release-policy.json","utf8"));fs.appendFileSync(process.env.GITHUB_OUTPUT,`prerelease=${policy.prerelease}\n`);'
+          cat >> release-body.md <<'NOTES'
+
+          ## Verify artifacts
+          Compare the downloaded artifact with SHA256SUMS.txt, then run:
+          `gh attestation verify ./ARTIFACT --repo caamer20/Telegram-Drive`
+          Inspect the verified producer workflow and tag/ref before installing.
+          Source and Arch runtime SBOMs and Sigstore bundles accompany this release.
+          NOTES
+
+      - name: Create or reuse draft release
+        id: create-release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { upsertDraft } = require('./scripts/release-draft.cjs');
+            const body = require('node:fs').readFileSync('release-body.md', 'utf8');
+            return await upsertDraft(github, context, context.ref.replace('refs/tags/', ''), body);
+
+  build-tauri:
+    needs: create-release
+    permissions:
+      contents: write
+    env:
+      TELEGRAM_DRIVE_SUPPORTER_SERVICE_URL: ${{ vars.SUPPORTER_SERVICE_URL }}
+      TELEGRAM_DRIVE_SUPPORTER_PUBLIC_KEY: ${{ vars.SUPPORTER_PUBLIC_KEY }}
+      TELEGRAM_DRIVE_CRASH_REPORT_ENDPOINT: ${{ vars.CRASH_REPORT_ENDPOINT }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows
+          - platform: windows-latest
+            args: '--bundles nsis --config src-tauri/tauri.windows.release.conf.json'
+            target: ''
+          
+          # Linux
+          - platform: ubuntu-22.04
+            args: ''
+            target: ''
+            
+          # macOS Intel
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            target: 'x86_64-apple-darwin'
+          
+          # macOS Apple Silicon
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            target: 'aarch64-apple-darwin'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.92.0
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libfuse2 \
+            libarchive-tools \
+            xvfb \
+            xauth \
+            dbus-x11
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Verify supporter release configuration
+        shell: node {0}
+        run: |
+          const serviceUrl = process.env.TELEGRAM_DRIVE_SUPPORTER_SERVICE_URL || '';
+          const publicKey = process.env.TELEGRAM_DRIVE_SUPPORTER_PUBLIC_KEY || '';
+          if (!serviceUrl.startsWith('https://') || serviceUrl.endsWith('/')) {
+            throw new Error('Set SUPPORTER_SERVICE_URL to the deployed HTTPS origin without a trailing slash.');
+          }
+          if (!/^[A-Za-z0-9_-]{43}$/.test(publicKey)) {
+            throw new Error('Set SUPPORTER_PUBLIC_KEY to the 32-byte Ed25519 public key in unpadded base64url form.');
+          }
+
+      - name: Prepare Windows runtime prerequisite
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./app/scripts/prepare-windows-runtime.ps1
+
+      - name: Prepare Tauri signing key
+        shell: node {0}
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          const fs = require('fs');
+          const key = process.env.KEY.trim();
+          // Tauri expects TAURI_SIGNING_PRIVATE_KEY to be base64-encoded.
+          // If the secret is raw key text, base64-encode it; otherwise pass through.
+          const b64 = key.startsWith('untrusted comment:')
+            ? Buffer.from(key).toString('base64')
+            : key;
+          fs.appendFileSync(process.env.GITHUB_ENV, `TAURI_SIGNING_PRIVATE_KEY=${b64}\n`);
+
+      # Platform code signing is applied only when its credentials exist in the
+      # repository. Without them the build is exactly what earlier releases
+      # shipped. A partly configured platform fails here instead of publishing
+      # a build that is signed but not notarized. See Docs/CODE_SIGNING.md.
+      - name: Configure platform code signing when credentials are provided
+        if: runner.os != 'Linux'
+        shell: node {0}
+        env:
+          MAC_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          MAC_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          MAC_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          MAC_API_KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          MAC_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          WIN_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          WIN_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          WIN_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          WIN_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          WIN_ACCOUNT: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          WIN_PROFILE: ${{ vars.AZURE_TRUSTED_SIGNING_PROFILE }}
+        run: |
+          const fs = require('fs');
+          const path = require('path');
+          const value = name => (process.env[name] || '').trim();
+          const exportEnv = (name, content) => {
+            if (/[\r\n]/.test(content)) throw new Error(`${name} must be a single line.`);
+            fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${content}\n`);
+          };
+          function credentials(label, names) {
+            const present = names.filter(name => value(name));
+            if (present.length === 0) {
+              console.log(`::warning::${label} signing credentials are not configured; this build is not platform-signed.`);
+              return false;
+            }
+            if (present.length !== names.length) {
+              const missing = names.filter(name => !value(name)).join(', ');
+              throw new Error(`${label} signing is partly configured. Missing: ${missing}`);
+            }
+            return true;
+          }
+          if (process.platform === 'darwin') {
+            const names = ['MAC_CERTIFICATE', 'MAC_CERTIFICATE_PASSWORD', 'MAC_SIGNING_IDENTITY', 'MAC_API_ISSUER', 'MAC_API_KEY_ID', 'MAC_API_KEY_P8'];
+            if (credentials('macOS', names)) {
+              const keyPath = path.join(process.env.RUNNER_TEMP, `AuthKey_${value('MAC_API_KEY_ID')}.p8`);
+              fs.writeFileSync(keyPath, `${process.env.MAC_API_KEY_P8.trim()}\n`, { mode: 0o600 });
+              exportEnv('APPLE_CERTIFICATE', value('MAC_CERTIFICATE').replace(/\s+/g, ''));
+              exportEnv('APPLE_CERTIFICATE_PASSWORD', value('MAC_CERTIFICATE_PASSWORD'));
+              exportEnv('APPLE_SIGNING_IDENTITY', value('MAC_SIGNING_IDENTITY'));
+              exportEnv('APPLE_API_ISSUER', value('MAC_API_ISSUER'));
+              exportEnv('APPLE_API_KEY', value('MAC_API_KEY_ID'));
+              exportEnv('APPLE_API_KEY_PATH', keyPath);
+              exportEnv('PLATFORM_SIGNING', 'macos');
+            }
+          } else if (process.platform === 'win32') {
+            const names = ['WIN_CLIENT_ID', 'WIN_CLIENT_SECRET', 'WIN_TENANT_ID', 'WIN_ENDPOINT', 'WIN_ACCOUNT', 'WIN_PROFILE'];
+            if (credentials('Windows', names)) {
+              for (const name of ['WIN_ENDPOINT', 'WIN_ACCOUNT', 'WIN_PROFILE']) {
+                if (!/^[A-Za-z0-9:/._-]+$/.test(value(name))) throw new Error(`${name} contains unexpected characters.`);
+              }
+              const command = `artifact-signing-cli -e ${value('WIN_ENDPOINT')} -a ${value('WIN_ACCOUNT')} -c ${value('WIN_PROFILE')} -d "Telegram Drive" %1`;
+              fs.writeFileSync('app/src-tauri/tauri.signing.conf.json', JSON.stringify({ bundle: { windows: { signCommand: command } } }));
+              exportEnv('AZURE_CLIENT_ID', value('WIN_CLIENT_ID'));
+              exportEnv('AZURE_CLIENT_SECRET', value('WIN_CLIENT_SECRET'));
+              exportEnv('AZURE_TENANT_ID', value('WIN_TENANT_ID'));
+              exportEnv('SIGNING_ARGS', '--config src-tauri/tauri.signing.conf.json');
+              exportEnv('PLATFORM_SIGNING', 'windows');
+            }
+          }
+
+      - name: Install the Windows signing client
+        if: env.PLATFORM_SIGNING == 'windows'
+        run: cargo install artifact-signing-cli --version 0.11.0 --locked
+
+      - name: Build the app
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: ${{ needs.create-release.outputs.prerelease == 'true' }}
+          projectPath: ./app
+          includeUpdaterJson: true
+          args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
+
+      # A signing step that silently did nothing must not reach users.
+      - name: Verify the macOS signature and notarization ticket
+        if: env.PLATFORM_SIGNING == 'macos'
+        run: |
+          set -euo pipefail
+          bundle="app/src-tauri/target/${{ matrix.target }}/release/bundle"
+          application="${bundle}/macos/Telegram Drive.app"
+          codesign --verify --deep --strict --verbose=2 "${application}"
+          codesign --display --verbose=2 "${application}" 2>&1 | grep -F 'Identifier=com.cameronamer.telegramdrive'
+          xcrun stapler validate "${application}"
+          spctl --assess --type execute --verbose=2 "${application}"
+
+      - name: Verify the Windows Authenticode signature
+        if: env.PLATFORM_SIGNING == 'windows'
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem app/src-tauri/target/release/bundle/nsis/*.exe
+          if ($installers.Count -ne 1) { throw "Expected exactly one installer; found $($installers.Count)" }
+          $applications = Get-ChildItem app/src-tauri/target/release/*.exe | Where-Object { $_.Name -notlike '*-setup.exe' }
+          if ($applications.Count -lt 1) { throw 'No application executable was found to verify' }
+          foreach ($file in @($installers[0].FullName) + @($applications | ForEach-Object { $_.FullName })) {
+            $signature = Get-AuthenticodeSignature $file
+            if ($signature.Status -ne 'Valid') { throw "$file is not validly signed: $($signature.StatusMessage)" }
+            if (-not $signature.TimeStamperCertificate) { throw "$file has no trusted timestamp" }
+          }
+
+      - name: Verify Windows installer runtime
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: ./app/scripts/verify-windows-bundle.ps1
+
+      - name: Smoke each packaged macOS or Linux application
+        if: runner.os != 'Windows'
+        run: bash scripts/smoke-packaged-artifacts.sh "app/src-tauri/target/${{ matrix.target }}/release/bundle"
+
+      - name: Smoke each packaged Windows installer application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-windows-package.ps1
+
+  build-arch:
+    name: Build and verify Arch package
+    needs: [create-release, build-tauri]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    container:
+      image: archlinux:base-devel-20260823.0.578598@sha256:68bfc3b0d277b08a99101dc9b94aaa03e5ae70cf1b4fb965c03b2b87b915760d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install packaging and smoke-test tools
+        run: |
+          pacman -Syu --noconfirm \
+            cairo \
+            dbus \
+            desktop-file-utils \
+            gdk-pixbuf2 \
+            github-cli \
+            gtk3 \
+            jq \
+            libayatana-appindicator \
+            libarchive \
+            libsoup3 \
+            namcap \
+            pacman-contrib \
+            webkit2gtk-4.1 \
+            xorg-server-xvfb \
+            xorg-xauth
+
+      - name: Download the exact upstream Debian release artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p upstream-linux
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir upstream-linux \
+            --pattern '*.deb' \
+            --clobber
+          mapfile -t deb_packages < <(find upstream-linux -maxdepth 1 -type f -name '*.deb' -print)
+          if [[ ${#deb_packages[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one Debian release artifact; found ${#deb_packages[@]}"
+            exit 1
+          fi
+
+      - name: Render checksum-locked PKGBUILD
+        run: |
+          set -euo pipefail
+          version="$(node scripts/release-tag-policy.cjs --tag "$GITHUB_REF_NAME" | jq -r .applicationVersion)"
+          deb_package="upstream-linux/Telegram.Drive_${version}_amd64.deb"
+          bash scripts/render-arch-pkgbuild.sh "${deb_package}" "${version}" arch-package
+          useradd --create-home --shell /bin/bash arch-builder
+          chown -R arch-builder:arch-builder arch-package
+
+      - name: Build as an unprivileged user
+        run: |
+          set -euo pipefail
+          runuser -u arch-builder -- bash -c 'cd "$1" && makepkg --printsrcinfo > .SRCINFO && makepkg --cleanbuild --clean --noconfirm' _ "$PWD/arch-package"
+          mapfile -t packages < <(find arch-package -maxdepth 1 -type f -name 'telegram-drive-bin-*.pkg.tar.zst' -print)
+          if [[ ${#packages[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one Arch package; found ${#packages[@]}"
+            exit 1
+          fi
+
+      - name: Run package policy and structure checks
+        run: |
+          set -euo pipefail
+          package_path="$(find arch-package -maxdepth 1 -type f -name 'telegram-drive-bin-*.pkg.tar.zst' -print -quit)"
+          namcap arch-package/PKGBUILD "${package_path}" 2>&1 | tee arch-package/namcap.log
+          if grep -Eq '(^|[[:space:]])E:' arch-package/namcap.log; then
+            echo '::error::namcap reported a package error'
+            exit 1
+          fi
+          pacman -Qip "${package_path}"
+          pacman -Qlp "${package_path}"
+          pacman -U --noconfirm "${package_path}"
+          pacman -Qkk telegram-drive-bin
+          bash scripts/verify-arch-package.sh "${package_path}" "$(node scripts/release-tag-policy.cjs --tag "$GITHUB_REF_NAME" | jq -r .applicationVersion)"
+
+      - name: Verify package reinstall preserves application data
+        run: |
+          set -euo pipefail
+          package_path="$(find arch-package -maxdepth 1 -type f -name 'telegram-drive-bin-*.pkg.tar.zst' -print -quit)"
+          seed_directory='/home/arch-builder/.local/share/com.cameronamer.telegramdrive'
+          install -d -o arch-builder -g arch-builder "${seed_directory}"
+          runuser -u arch-builder -- sh -c 'printf preserved > "$1/arch-package-preservation-test"' _ "${seed_directory}"
+          pacman -U --noconfirm "${package_path}"
+          grep -Fqx 'preserved' "${seed_directory}/arch-package-preservation-test"
+
+      - name: Run native X11 startup smoke test
+        run: |
+          set -euo pipefail
+          smoke_token="$(node -e 'process.stdout.write("0" + require("node:crypto").randomBytes(16).toString("hex").slice(1))')"
+          # Arch repackages the exact Debian executable; retain its runtime type.
+          runuser -u arch-builder -- xvfb-run -a dbus-run-session -- node "$PWD/scripts/packaged-startup-smoke.cjs" --disposable-user --executable /usr/bin/telegram-drive --run-token "$smoke_token" --expected-bundle-type deb > arch-package/startup-smoke.log 2>&1
+          cat arch-package/startup-smoke.log
+
+      - name: Generate resolved Arch runtime SBOM
+        run: |
+          bash scripts/generate-arch-runtime-sbom.sh \
+            "$(node scripts/release-tag-policy.cjs --tag "$GITHUB_REF_NAME" | jq -r .applicationVersion)" \
+            arch-package/telegram-drive-arch-runtime-sbom.cdx.json
+
+      - name: Upload verified Arch assets to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          package_path="$(find arch-package -maxdepth 1 -type f -name 'telegram-drive-bin-*.pkg.tar.zst' -print -quit)"
+          gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            "${package_path}" \
+            arch-package/telegram-drive-arch-runtime-sbom.cdx.json \
+            --clobber
+
+  release-assurance:
+    needs: [create-release, build-tauri, build-arch]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.92.0
+
+
+      - name: Generate locked source SBOM
+        run: node scripts/generate-sboms.cjs release-assurance
+
+      - name: Download the final draft release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-assets
+          gh release download "$GITHUB_REF_NAME" --dir release-assets --clobber
+          rm -f release-assets/SHA256SUMS.txt release-assets/telegram-drive-source-sbom.cdx.json release-assets/provenance.sigstore.json release-assets/sbom-attestation.sigstore.json release-assets/arch-sbom-attestation.sigstore.json
+          cp release-assurance/telegram-drive-source-sbom.cdx.json release-assets/
+          node scripts/generate-checksums.cjs release-assets release-assurance/SUBJECTS.sha256
+
+      - name: Prepare the Arch package SBOM subject
+        run: |
+          set -euo pipefail
+          mapfile -t arch_packages < <(find release-assets -maxdepth 1 -type f -name 'telegram-drive-bin-*.pkg.tar.zst' -print)
+          if [[ ${#arch_packages[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one assured Arch package; found ${#arch_packages[@]}"
+            exit 1
+          fi
+          test -s release-assets/telegram-drive-arch-runtime-sbom.cdx.json
+          sha256sum "${arch_packages[0]}" > release-assurance/ARCH_SUBJECT.sha256
+
+      - name: Attest release provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: release-assurance/SUBJECTS.sha256
+
+      - name: Attest release SBOM
+        id: sbom-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: release-assurance/SUBJECTS.sha256
+          sbom-path: release-assurance/telegram-drive-source-sbom.cdx.json
+
+      - name: Attest the Arch runtime SBOM
+        id: arch-sbom-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: release-assurance/ARCH_SUBJECT.sha256
+          sbom-path: release-assets/telegram-drive-arch-runtime-sbom.cdx.json
+
+      - name: Verify and upload release assurance artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom-attestation.outputs.bundle-path }}
+          ARCH_SBOM_BUNDLE: ${{ steps.arch-sbom-attestation.outputs.bundle-path }}
+        run: |
+          while IFS= read -r artifact; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" --bundle "$PROVENANCE_BUNDLE" --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          done < <(find release-assets -maxdepth 1 -type f -print | sort)
+          cp "$PROVENANCE_BUNDLE" release-assets/provenance.sigstore.json
+          cp "$SBOM_BUNDLE" release-assets/sbom-attestation.sigstore.json
+          cp "$ARCH_SBOM_BUNDLE" release-assets/arch-sbom-attestation.sigstore.json
+          node scripts/generate-checksums.cjs release-assets release-assets/SHA256SUMS.txt
+          (cd release-assets && sha256sum -c SHA256SUMS.txt)
+          gh release upload "$GITHUB_REF_NAME" \
+            release-assets/telegram-drive-source-sbom.cdx.json \
+            release-assets/telegram-drive-arch-runtime-sbom.cdx.json \
+            release-assets/provenance.sigstore.json \
+            release-assets/sbom-attestation.sigstore.json \
+            release-assets/arch-sbom-attestation.sigstore.json \
+            release-assets/SHA256SUMS.txt \
+            --clobber
+
+  publish-release:
+    needs: [create-release, build-tauri, build-arch, release-assurance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Publish Release
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          release_id: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { publish } = require('./scripts/release-draft.cjs');
+            await publish(github, context, process.env.release_id, context.ref.replace('refs/tags/', ''));
+
+  refresh-product-page:
+    name: Refresh product page after stable publication
+    needs: publish-release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      # GITHUB_TOKEN publication does not emit a new release-triggered run.
+      # Dispatch main explicitly so Pages keeps its branch protection and
+      # mirrors the newly published stable desktop updater manifest.
+      - name: Request main-branch Pages deployment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo,
+              workflow_id: 'pages.yml',
+              ref: 'main',
+            });

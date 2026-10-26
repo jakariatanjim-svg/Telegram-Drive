@@ -1,0 +1,56 @@
+{
+  "identifier": "mobile-only",
+  "description": "Permissions required only on Android",
+  "platforms": [
+    "android"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "os:default",
+    "store:default",
+    "deep-link:default",
+    "clipboard-manager:allow-write-text",
+    {
+      "identifier": "fs:allow-read",
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        },
+        {
+          "path": "$APPDATA/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write",
+      "allow": [
+        {
+          "path": "$APPCACHE/**"
+        },
+        {
+          "path": "$APPDATA/**"
+        }
+      ]
+    },
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "shell:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*"
+        },
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "mailto:*"
+        }
+      ]
+    }
+  ]
+}

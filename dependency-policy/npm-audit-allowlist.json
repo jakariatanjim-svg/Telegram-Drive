@@ -1,0 +1,6 @@
+{
+  "expires": "2026-12-30",
+  "reviewed": "2026-10-01",
+  "advisories": {},
+  "policy": "Temporary reviewed baseline only. New advisories fail. The 2026-10-01 review cleared every prior entry with a compatible lockfile refresh and the PDF.js 6 upgrade, so the list is empty; add an entry only with a written rationale, and do not extend the expiry without explicit review."
+}
