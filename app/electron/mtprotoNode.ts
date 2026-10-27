@@ -2,14 +2,17 @@ import nodeCrypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { safeStorage } from 'electron';
 import { withHttpProxy, withSocksProxy } from '@fuman/net';
-import { connectTcp } from '@fuman/node';
+import { connectTcp, nodeReadableToFuman } from '@fuman/node';
 import {
+  BaseMtProxyTransport,
   IntermediatePacketCodec,
   MemoryStorage,
   type ICorePlatform,
   type TelegramTransport,
+  type UploadFileLike,
 } from '@mtcute/core';
 import { BaseTelegramClient, TelegramClient } from '@mtcute/core/client.js';
 import type { BasicDcOption } from '@mtcute/core/utils.js';
@@ -23,6 +26,10 @@ export interface ProxySettingsConfig {
   username?: string;
   password?: string;
   secret?: string;
+}
+
+class NodeMtProxyTransport extends BaseMtProxyTransport {
+  override _connectTcp = connectTcp;
 }
 
 class NodeCorePlatform implements ICorePlatform {
@@ -44,16 +51,68 @@ class NodeCorePlatform implements ICorePlatform {
   getDefaultLogLevel(): number | null {
     return 0;
   }
+
+  async normalizeFile(file: UploadFileLike) {
+    if (typeof file === 'string') {
+      const stat = await fs.promises.stat(file);
+      return {
+        file: nodeReadableToFuman(fs.createReadStream(file)) as unknown as UploadFileLike,
+        fileSize: stat.size,
+        fileName: path.basename(file),
+      };
+    }
+    if (file instanceof Readable) {
+      return {
+        file: nodeReadableToFuman(file) as unknown as UploadFileLike,
+      };
+    }
+    return null;
+  }
 }
 
 export class ConfigurableNodeTransport implements TelegramTransport {
+  private mtProxyCache: { key: string; transport: NodeMtProxyTransport } | null = null;
+  private crypto?: Parameters<BaseMtProxyTransport['setup']>[0];
+  private log?: Parameters<BaseMtProxyTransport['setup']>[1];
+
   constructor(private readonly getProxy: () => ProxySettingsConfig | null) {}
+
+  setup(
+    crypto: Parameters<BaseMtProxyTransport['setup']>[0],
+    log: Parameters<BaseMtProxyTransport['setup']>[1],
+  ): void {
+    this.crypto = crypto;
+    this.log = log;
+  }
+
+  private resolveMtProxy(proxy: ProxySettingsConfig): NodeMtProxyTransport | null {
+    if (!proxy.enabled || proxy.type !== 'mtproto' || !proxy.host || proxy.port <= 0 || !proxy.secret) {
+      return null;
+    }
+    const key = `${proxy.host}:${proxy.port}:${proxy.secret}`;
+    if (!this.mtProxyCache || this.mtProxyCache.key !== key) {
+      const transport = new NodeMtProxyTransport({
+        host: proxy.host,
+        port: proxy.port,
+        secret: proxy.secret,
+      });
+      if (this.crypto && this.log) {
+        transport.setup(this.crypto, this.log);
+      }
+      this.mtProxyCache = { key, transport };
+    }
+    return this.mtProxyCache.transport;
+  }
 
   async connect(dc: BasicDcOption, abortSignal: AbortSignal) {
     const proxy = this.getProxy();
     const endpoint = { address: dc.ipAddress, port: dc.port };
 
     if (proxy?.enabled && proxy.host && proxy.port > 0) {
+      const mtProxy = this.resolveMtProxy(proxy);
+      if (mtProxy) {
+        return mtProxy.connect(dc, abortSignal);
+      }
       if (proxy.type === 'http') {
         const dial = withHttpProxy(connectTcp, {
           host: proxy.host,
@@ -77,23 +136,45 @@ export class ConfigurableNodeTransport implements TelegramTransport {
     return connectTcp(endpoint, abortSignal);
   }
 
-  packetCodec() {
+  packetCodec(dc: BasicDcOption) {
+    const proxy = this.getProxy();
+    if (proxy) {
+      const mtProxy = this.resolveMtProxy(proxy);
+      if (mtProxy) {
+        return mtProxy.packetCodec(dc);
+      }
+    }
     return new IntermediatePacketCodec();
   }
 }
 
-function resolveWasmBuffer(): Uint8Array {
-  const candidates = [
-    path.join(__dirname, 'mtcute.wasm'),
-    path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'mtcute.wasm'),
-    path.resolve(process.cwd(), 'node_modules', '@mtcute', 'wasm', 'mtcute.wasm'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return fs.readFileSync(candidate);
-    }
+let cachedWasmModulePromise: Promise<WebAssembly.Module> | null = null;
+
+function resolveWasmModule(): Promise<WebAssembly.Module> {
+  if (!cachedWasmModulePromise) {
+    cachedWasmModulePromise = (async () => {
+      const candidates = [
+        path.join(process.resourcesPath ?? '', 'app.asar.unpacked', 'dist-electron', 'mtcute.wasm'),
+        path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), 'mtcute.wasm'),
+        path.join(__dirname, 'mtcute.wasm'),
+        path.join(process.resourcesPath ?? '', 'app.asar', 'dist-electron', 'mtcute.wasm'),
+        path.join(process.resourcesPath ?? '', 'mtcute.wasm'),
+        path.resolve(__dirname, '..', 'node_modules', '@mtcute', 'wasm', 'mtcute.wasm'),
+        path.resolve(process.cwd(), 'node_modules', '@mtcute', 'wasm', 'mtcute.wasm'),
+      ];
+      for (const candidate of candidates) {
+        if (candidate && fs.existsSync(candidate)) {
+          const bytes = fs.readFileSync(candidate);
+          return WebAssembly.compile(bytes);
+        }
+      }
+      throw new Error('mtcute.wasm binary could not be located.');
+    })().catch(err => {
+      cachedWasmModulePromise = null;
+      throw err;
+    });
   }
-  throw new Error('mtcute.wasm binary could not be located.');
+  return cachedWasmModulePromise;
 }
 
 function fallbackMachineKey(): Buffer {
@@ -160,19 +241,20 @@ export function readEncryptedSecretFile(filePath: string): string | null {
   return null;
 }
 
-export function createNodeTelegramClient(opts: {
+export async function createNodeTelegramClient(opts: {
   apiId: number;
   apiHash: string;
   getProxy: () => ProxySettingsConfig | null;
-}): TelegramClient {
-  const wasmBytes = resolveWasmBuffer();
+}): Promise<TelegramClient> {
+  const wasmModule = await resolveWasmModule();
   const baseClient = new BaseTelegramClient({
     apiId: opts.apiId,
     apiHash: opts.apiHash,
     storage: new MemoryStorage(),
+    updates: false,
     crypto: new WebCryptoProvider({
       crypto: nodeCrypto.webcrypto as unknown as NonNullable<ConstructorParameters<typeof WebCryptoProvider>[0]>['crypto'],
-      wasmInput: wasmBytes,
+      wasmInput: wasmModule,
     }),
     transport: new ConfigurableNodeTransport(opts.getProxy),
     platform: new NodeCorePlatform(),
