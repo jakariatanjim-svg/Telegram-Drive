@@ -46,8 +46,8 @@ jobs:
             echo "Missing Android signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD)." >&2
             exit 1
           fi
-          KS_FILE="${RUNNER_TEMP}/telegram-drive-release.jks"
-          echo "$KS_B64" | base64 --decode > "$KS_FILE"
+          KS_FILE="${RUNNER_TEMP}/telegram-drive-release.p12"
+          printf '%s' "$KS_B64" | tr -d '[:space:]' | base64 -d > "$KS_FILE"
           echo "ks_path=$KS_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js 22
@@ -110,4 +110,4 @@ jobs:
 
       - name: Clean temporary keystore and staged APK
         if: always()
-        run: rm -f "${RUNNER_TEMP}/telegram-drive-release.jks" "${RUNNER_TEMP}"/Telegram-Drive-*.apk
+        run: rm -f "${RUNNER_TEMP}/telegram-drive-release.p12" "${RUNNER_TEMP}"/Telegram-Drive-*.apk

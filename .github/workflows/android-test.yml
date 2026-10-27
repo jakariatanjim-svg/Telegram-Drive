@@ -47,9 +47,9 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          KS_FILE="${RUNNER_TEMP}/telegram-drive-test.jks"
+          KS_FILE="${RUNNER_TEMP}/telegram-drive-test.p12"
           if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
-            echo "$KS_B64" | base64 --decode > "$KS_FILE"
+            printf '%s' "$KS_B64" | tr -d '[:space:]' | base64 -d > "$KS_FILE"
             echo "ks_path=$KS_FILE" >> "$GITHUB_OUTPUT"
             echo "ks_pass=$KS_PASS" >> "$GITHUB_OUTPUT"
             echo "key_alias=$KEY_ALIAS" >> "$GITHUB_OUTPUT"
@@ -57,8 +57,9 @@ jobs:
           else
             EPHEMERAL_PASS="tgdrive_ci_test_only"
             keytool -genkeypair -v \
+              -storetype PKCS12 \
               -keystore "$KS_FILE" \
-              -keyalg RSA -keysize 2048 -validity 365 \
+              -keyalg RSA -keysize 4096 -validity 10000 \
               -alias tgdrive_test \
               -storepass "$EPHEMERAL_PASS" \
               -keypass "$EPHEMERAL_PASS" \
@@ -100,4 +101,4 @@ jobs:
 
       - name: Clean temporary keystore
         if: always()
-        run: rm -f "${RUNNER_TEMP}/telegram-drive-test.jks"
+        run: rm -f "${RUNNER_TEMP}/telegram-drive-test.p12"

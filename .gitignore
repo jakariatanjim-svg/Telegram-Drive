@@ -46,6 +46,8 @@ local.properties
 *.aab
 *.keystore
 *.jks
+*.p12
+*.pfx
 *.idsig
 *.key
 *.DMP
