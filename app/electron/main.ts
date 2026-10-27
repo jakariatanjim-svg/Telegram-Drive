@@ -6,6 +6,7 @@ import {
   Menu,
   Tray,
   app,
+  clipboard,
   dialog,
   ipcMain,
   nativeImage,
@@ -222,6 +223,45 @@ function createMainWindow(): void {
   }
 }
 
+function resolveStaticMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return 'text/javascript; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.wasm':
+      return 'application/wasm';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    case '.ico':
+      return 'image/x-icon';
+    case '.woff2':
+      return 'font/woff2';
+    case '.woff':
+      return 'font/woff';
+    case '.ttf':
+      return 'font/ttf';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
 function registerProtocols(): void {
   const distDir = path.resolve(__dirname, '..', 'dist');
 
@@ -240,7 +280,14 @@ function registerProtocols(): void {
         ? candidate
         : path.join(distDir, 'index.html');
 
-    return net.fetch(pathToFileURL(finalFile).href);
+    const body = fs.readFileSync(finalFile);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': resolveStaticMimeType(finalFile),
+        'Cache-Control': 'no-cache',
+      },
+    });
   });
 
   protocol.handle('tdfile', request => {
@@ -378,6 +425,14 @@ function registerIpcHandlers(): void {
     if (typeof targetPath === 'string' && fs.existsSync(targetPath)) {
       shell.showItemInFolder(targetPath);
     }
+  });
+
+  ipcMain.handle('td:clipboard', async (_e, action: 'read' | 'write', text?: string) => {
+    if (action === 'write') {
+      clipboard.writeText(String(text ?? ''));
+      return null;
+    }
+    return clipboard.readText();
   });
 }
 

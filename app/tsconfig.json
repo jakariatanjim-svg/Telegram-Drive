@@ -35,6 +35,5 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  "exclude": ["src/components/mobile/MobileDashboard.tsx"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

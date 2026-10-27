@@ -1,4 +1,4 @@
-import { clipboard, contextBridge, ipcRenderer, webUtils } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 export interface ElectronBridgeApi {
   readonly isElectron: true;
@@ -45,9 +45,9 @@ const api: ElectronBridgeApi = {
   openExternal: url => ipcRenderer.invoke('td:open-external', url),
   openPath: targetPath => ipcRenderer.invoke('td:open-path', targetPath),
   revealItemInDir: targetPath => ipcRenderer.invoke('td:reveal-path', targetPath),
-  clipboardReadText: async () => clipboard.readText(),
+  clipboardReadText: () => ipcRenderer.invoke('td:clipboard', 'read') as Promise<string>,
   clipboardWriteText: async text => {
-    clipboard.writeText(text);
+    await ipcRenderer.invoke('td:clipboard', 'write', text);
   },
   getPathForFile: (file: File) => {
     try {
