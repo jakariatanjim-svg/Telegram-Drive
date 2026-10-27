@@ -43,6 +43,7 @@ android {
         if (hasReleaseKeystore) {
             release {
                 storeFile file(keystorePath)
+                storeType "PKCS12"
                 storePassword keystorePassword
                 keyAlias keyAliasEnv
                 keyPassword keyPasswordEnv
