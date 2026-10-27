@@ -13,16 +13,11 @@ export default defineConfig(async () => ({
   ],
 
   optimizeDeps: {
-    // Only the app and direct browser fixtures are frontend entry points.
-    // Vite's default **/*.html discovery also walks native build trees and
-    // generated reports, which can delay the first document by over a minute.
-    entries: ['index.html', 'src/components/dev/*BrowserFixture.tsx'],
+    entries: ['index.html'],
   },
 
   build: {
     manifest: true,
-    // Keep Vite's warning aligned with the reviewed hard failure ceiling in
-    // bundle-budget.json. The budget checker still fails the build at 550 kB.
     chunkSizeWarningLimit: 550,
   },
 

@@ -6,7 +6,6 @@ export const DEFAULT_LOCAL_MEDIA_ORIGIN = `http://localhost:${DEFAULT_LOCAL_MEDI
 
 interface StartupHealth {
   streaming_port?: unknown;
-  sponsor_port?: unknown;
 }
 
 let pendingOrigin: Promise<string> | null = null;
@@ -30,15 +29,4 @@ export function localMediaOrigin(): Promise<string> {
       return DEFAULT_LOCAL_MEDIA_ORIGIN;
     });
   return pendingOrigin;
-}
-
-/** Selected sponsor listener, refreshed per display cycle; failures never revert to media. */
-export function localSponsorOrigin(): Promise<string | null> {
-  return invoke<StartupHealth | null>('cmd_get_startup_health')
-    .then(health => {
-      const port = health?.sponsor_port ?? health?.streaming_port;
-      return typeof port === 'number' && Number.isInteger(port) && port > 0 && port <= 65_535
-        ? originForPort(port) : null;
-    })
-    .catch(() => null);
 }

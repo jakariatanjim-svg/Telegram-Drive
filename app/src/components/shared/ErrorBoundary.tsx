@@ -1,7 +1,6 @@
 import { Component, type ReactNode } from 'react';
 import {useTranslation} from 'react-i18next';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
-import { reportCrash } from '../../services/crashTelemetry';
 
 interface Props {
     children: ReactNode;
@@ -25,7 +24,6 @@ export class ErrorBoundary extends Component<Props, State> {
     componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
         console.error('ErrorBoundary caught an error:', error, errorInfo);
         sessionStorage.setItem('telegram-drive-recovered-session', 'true');
-        reportCrash(error, 'react');
     }
 
     handleReload = () => {

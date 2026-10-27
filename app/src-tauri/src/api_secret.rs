@@ -8,7 +8,7 @@
 use keyring::Entry;
 
 #[cfg(not(target_os = "android"))]
-const KEYRING_SERVICE: &str = "com.cameronamer.telegramdrive.telegram-api";
+const KEYRING_SERVICE: &str = "io.github.jakariatanjim.telegramdrive.telegram-api";
 const API_HASH_ACCOUNT: &str = "api-hash-v1";
 
 #[cfg(not(target_os = "android"))]
@@ -66,7 +66,7 @@ fn android_secret(operation: &str, value: Option<&str>) -> Result<Option<String>
             let result = env
                 .call_static_method(
                     &main_class,
-                    "getSupporterSecret",
+                    "getKeystoreSecret",
                     "(Ljava/lang/String;)Ljava/lang/String;",
                     &[jni::objects::JValue::from(&account)],
                 )
@@ -92,7 +92,7 @@ fn android_secret(operation: &str, value: Option<&str>) -> Result<Option<String>
             let saved = env
                 .call_static_method(
                     &main_class,
-                    "putSupporterSecret",
+                    "putKeystoreSecret",
                     "(Ljava/lang/String;Ljava/lang/String;)Z",
                     &[
                         jni::objects::JValue::from(&account),
@@ -112,7 +112,7 @@ fn android_secret(operation: &str, value: Option<&str>) -> Result<Option<String>
             let deleted = env
                 .call_static_method(
                     &main_class,
-                    "deleteSupporterSecret",
+                    "deleteKeystoreSecret",
                     "(Ljava/lang/String;)Z",
                     &[jni::objects::JValue::from(&account)],
                 )

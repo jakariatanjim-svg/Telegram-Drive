@@ -1,7 +1,7 @@
 import {useTranslation} from 'react-i18next';
-import { lazy, useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
-import { Bug, Cloud, Database, Globe, HardDrive, Megaphone, Shield, Zap, Clipboard, Loader2, RefreshCw, Upload, Download } from 'lucide-react';
+import { Cloud, Database, Globe, HardDrive, Shield, Zap, Clipboard, Loader2, RefreshCw, Upload, Download } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-shell';
 import { toast } from 'sonner';
 import type { TFunction } from 'i18next';
@@ -16,9 +16,6 @@ import {
   type SettingsSyncStatus,
 } from '../../../../services/settingsSync';
 import i18n from '../../../../i18n';
-import { LazyFeatureBoundary } from '../../../shared/LazyFeatureBoundary';
-
-const SupporterSettingsSection = lazy(() => import('./SupporterSettingsSection').then(module => ({ default: module.SupporterSettingsSection })));
 
 const tabMotion = {
   initial: { opacity: 0 },
@@ -52,8 +49,6 @@ export function SharingSettingsTab({ children }: SettingsTabFrameProps) {
 }
 
 interface PrivacySettingsTabProps {
-  crashReportingEnabled: boolean;
-  onCrashReportingChange: () => void;
   settings: Settings;
   onSettingsChange: (updates: Partial<Settings>) => void;
   onSettingsSyncEnabledChange: (enabled: boolean) => void;
@@ -188,26 +183,16 @@ function SettingsSyncSection({
 }
 
 
-export function PrivacySettingsTab({ crashReportingEnabled, onCrashReportingChange, settings, onSettingsChange, onSettingsSyncEnabledChange }: PrivacySettingsTabProps) {
+export function PrivacySettingsTab({ settings, onSettingsChange, onSettingsSyncEnabledChange }: PrivacySettingsTabProps) {
   const { t } = useTranslation();
   return (
     <motion.section key="privacy" {...tabMotion} className="space-y-4">
-      <div className="flex items-start gap-3 rounded-lg border border-app-accent/20 bg-app-accent/5 p-4">
-        <Bug className="mt-0.5 h-5 w-5 shrink-0 text-app-accent" />
-        <div><h3 className="text-sm font-semibold text-app-text">Crash-only reporting</h3><p className="mt-1 text-xs leading-5 text-app-text-secondary">Optional reports help diagnose unexpected app crashes. Normal usage, analytics, advertising activity, and file operations are never reported.</p></div>
-      </div>
-      <div className="flex items-center justify-between rounded-lg bg-app-hover/50 p-4">
-        <div className="max-w-[75%]"><p className="text-sm font-medium text-app-text">Send anonymous crash reports</p><p className="mt-1 text-xs leading-5 text-app-text-secondary">Never sends file names, paths, contents, Telegram messages, credentials, or personal identifiers. Turning this off also clears reports waiting to be sent.</p></div>
-        <button type="button" role="switch" aria-checked={crashReportingEnabled} aria-label="Send anonymous crash reports" onClick={onCrashReportingChange} className={`relative h-6 w-11 rounded-full transition-colors ${crashReportingEnabled ? 'bg-app-accent' : 'bg-app-border'}`}><span className={`absolute start-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${crashReportingEnabled ? 'translate-x-5 rtl:-translate-x-5' : ''}`} /></button>
-      </div>
       <section className="space-y-3" aria-labelledby="data-usage-title">
         <div><h3 id="data-usage-title" className="text-sm font-semibold text-app-text">Where your data goes</h3><p className="mt-1 text-xs leading-5 text-app-text-secondary">Telegram Drive has no account server of its own. Each destination below is separated by purpose.</p></div>
         <div className="grid gap-3 sm:grid-cols-2">
           {([
             [t('privacy_destinations.device_title'), t('privacy_destinations.device_body'), Database],
             ['Telegram', t('privacy_destinations.telegram_body'), Cloud],
-            [t('privacy_destinations.sponsors_title'), t('privacy_destinations.sponsors_body'), Megaphone],
-            [t('privacy_destinations.crash_title'), t('privacy_destinations.crash_body'), Bug],
           ] as const).map(([title, description, Icon]) => (
             <div key={title} className="rounded-lg border border-app-border-subtle bg-app-surface-sunken/25 p-3"><Icon className="h-4 w-4 text-app-accent" aria-hidden="true" /><strong className="mt-2 block text-xs text-app-text">{title}</strong><p className="mt-1 text-xs leading-5 text-app-text-secondary">{description}</p></div>
           ))}
@@ -217,10 +202,6 @@ export function PrivacySettingsTab({ crashReportingEnabled, onCrashReportingChan
       <SettingsSyncSection settings={settings} onSettingsChange={onSettingsChange} onEnabledChange={onSettingsSyncEnabledChange} />
     </motion.section>
   );
-}
-
-export function LicenseSettingsTab() {
-  return <motion.section key="license" {...tabMotion}><LazyFeatureBoundary><SupporterSettingsSection /></LazyFeatureBoundary></motion.section>;
 }
 
 interface AdvancedSettingsTabProps {
@@ -276,11 +257,9 @@ export function AboutSettingsTab({ appVersion, diagnosticsLoading, t, onCopyDiag
           {t('settings.copy_diagnostics')}
         </button>
         <div className="space-y-3 text-center">
-          <p className="text-sm font-semibold text-telegram-text">Cameron Amer</p>
-          <button onClick={event => { event.preventDefault(); void open('https://www.cameronamer.com'); }} className="flex cursor-pointer items-center justify-center gap-1.5 text-xs text-telegram-primary transition-colors hover:text-telegram-primary/80"><Globe className="h-3.5 w-3.5" />www.cameronamer.com</button>
-          <button onClick={event => { event.preventDefault(); void open('https://github.com/caamer20/telegram-drive'); }} className="flex cursor-pointer items-center justify-center gap-1.5 text-xs text-telegram-primary transition-colors hover:text-telegram-primary/80">
+          <button onClick={event => { event.preventDefault(); void open('https://github.com/jakariatanjim-svg/Telegram-Drive'); }} className="flex cursor-pointer items-center justify-center gap-1.5 text-xs text-telegram-primary transition-colors hover:text-telegram-primary/80">
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" /></svg>
-            github.com/caamer20/telegram-drive
+            github.com/jakariatanjim-svg/Telegram-Drive
           </button>
         </div>
         <p className="max-w-[280px] text-center text-[11px] leading-relaxed text-telegram-subtext">{t('settings.tagline')}</p>
