@@ -22,10 +22,22 @@ export interface ElectronBridgeApi {
   getPathForFile: (file: File) => string;
 }
 
+async function unwrapIpcInvoke<T>(channel: string, ...args: unknown[]): Promise<T> {
+  try {
+    return (await ipcRenderer.invoke(channel, ...args)) as T;
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const cleaned = raw
+      .replace(/^Error invoking remote method '[^']+':\s*/, '')
+      .replace(/^Error:\s*/, '');
+    throw new Error(cleaned || 'IPC invocation failed');
+  }
+}
+
 const api: ElectronBridgeApi = {
   isElectron: true,
   platform: 'windows',
-  invoke: (cmd, args) => ipcRenderer.invoke('td:invoke', cmd, args ?? {}),
+  invoke: (cmd, args) => unwrapIpcInvoke('td:invoke', cmd, args ?? {}),
   emitToBackend: (event, payload) => {
     ipcRenderer.send('td:client-event', event, payload);
   },
@@ -38,16 +50,16 @@ const api: ElectronBridgeApi = {
       ipcRenderer.removeListener('td:event', handler);
     };
   },
-  windowAction: (action, payload) => ipcRenderer.invoke('td:window', action, payload),
+  windowAction: (action, payload) => unwrapIpcInvoke('td:window', action, payload),
   storeAction: (storeName, action, key, value) =>
-    ipcRenderer.invoke('td:store', storeName, action, key, value),
-  dialogAction: (kind, options) => ipcRenderer.invoke('td:dialog', kind, options ?? {}),
-  openExternal: url => ipcRenderer.invoke('td:open-external', url),
-  openPath: targetPath => ipcRenderer.invoke('td:open-path', targetPath),
-  revealItemInDir: targetPath => ipcRenderer.invoke('td:reveal-path', targetPath),
-  clipboardReadText: () => ipcRenderer.invoke('td:clipboard', 'read') as Promise<string>,
+    unwrapIpcInvoke('td:store', storeName, action, key, value),
+  dialogAction: (kind, options) => unwrapIpcInvoke('td:dialog', kind, options ?? {}),
+  openExternal: url => unwrapIpcInvoke('td:open-external', url),
+  openPath: targetPath => unwrapIpcInvoke('td:open-path', targetPath),
+  revealItemInDir: targetPath => unwrapIpcInvoke('td:reveal-path', targetPath),
+  clipboardReadText: () => unwrapIpcInvoke<string>('td:clipboard', 'read'),
   clipboardWriteText: async text => {
-    await ipcRenderer.invoke('td:clipboard', 'write', text);
+    await unwrapIpcInvoke('td:clipboard', 'write', text);
   },
   getPathForFile: (file: File) => {
     try {

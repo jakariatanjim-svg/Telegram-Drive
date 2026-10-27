@@ -37,6 +37,7 @@ const STATE_STORAGE_KEY = 'telegram_drive_android_state_v1';
 interface AndroidPersistedState {
   deviceId: string;
   apiId: number | null;
+  hasAuthorizedSession?: boolean;
   folders: Array<{
     id: number;
     name: string;
@@ -107,8 +108,9 @@ class AndroidWebEngine {
   private state: AndroidPersistedState;
   private readonly vault = new VaultRuntime();
   private client: TelegramClient | null = null;
+  private currentApiHash: string | null = null;
   private currentUserId: string | null = null;
-  private wasmBytesPromise: Promise<Uint8Array> | null = null;
+  private wasmModulePromise: Promise<WebAssembly.Module> | null = null;
   private filesCache = new Map<string, MappedTelegramFile[]>();
   private blobUrlCache = new Map<string, string>();
   private activeAborts = new Map<string, AbortController>();
@@ -128,6 +130,10 @@ class AndroidWebEngine {
     error: string | null;
     abort: AbortController | null;
     providePassword?: (pw: string) => void;
+    pendingPasswordResult?: {
+      resolve: () => void;
+      reject: (err: Error) => void;
+    };
   } = {
     latestUrl: null,
     needsPassword: false,
@@ -149,6 +155,7 @@ class AndroidWebEngine {
     const defaults: AndroidPersistedState = {
       deviceId: crypto.randomUUID(),
       apiId: null,
+      hasAuthorizedSession: false,
       folders: [],
       groups: [],
       fileRenames: {},
@@ -214,11 +221,21 @@ class AndroidWebEngine {
     localStorage.removeItem(`td_sec_${key}`);
   }
 
-  private async getWasmBytes(): Promise<Uint8Array> {
-    this.wasmBytesPromise ??= fetch(mtcuteWasmUrl)
-      .then(r => r.arrayBuffer())
-      .then(buf => new Uint8Array(buf));
-    return this.wasmBytesPromise;
+  private async getWasmModule(): Promise<WebAssembly.Module> {
+    if (!this.wasmModulePromise) {
+      this.wasmModulePromise = (async () => {
+        const res = await fetch(mtcuteWasmUrl);
+        if (!res.ok) {
+          throw new Error(`Failed to load mtcute.wasm (${res.status})`);
+        }
+        const buf = await res.arrayBuffer();
+        return WebAssembly.compile(buf);
+      })().catch(err => {
+        this.wasmModulePromise = null;
+        throw err;
+      });
+    }
+    return this.wasmModulePromise;
   }
 
   private async ensureClient(apiId?: number, apiHash?: string): Promise<TelegramClient> {
@@ -230,24 +247,26 @@ class AndroidWebEngine {
       throw new Error('API_CREDENTIALS_MISSING');
     }
 
-    if (this.client && this.state.apiId === resolvedId) {
+    if (this.client && this.state.apiId === resolvedId && this.currentApiHash === resolvedHash) {
       return this.client;
     }
 
     if (this.client) {
       await this.client.destroy().catch(() => undefined);
       this.client = null;
+      this.currentApiHash = null;
     }
 
     this.state.apiId = resolvedId;
     this.saveState();
 
-    const wasmBytes = await this.getWasmBytes();
+    const wasmModule = await this.getWasmModule();
     const baseClient = new BaseTelegramClient({
       apiId: resolvedId,
       apiHash: resolvedHash,
       storage: new IdbStorage('telegram-drive-mtproto-session'),
-      crypto: new WebCryptoProvider({ wasmInput: wasmBytes }),
+      updates: false,
+      crypto: new WebCryptoProvider({ wasmInput: wasmModule }),
       transport: new WebSocketTransport(),
       platform: new WebPlatform(),
       initConnectionOptions: {
@@ -263,6 +282,7 @@ class AndroidWebEngine {
       client: baseClient,
       disableUpdates: true,
     });
+    this.currentApiHash = resolvedHash;
     return this.client;
   }
 
@@ -386,6 +406,7 @@ class AndroidWebEngine {
         return await this.loadSecret('api_hash');
       case 'cmd_clear_api_hash':
         await this.removeSecret('api_hash');
+        this.currentApiHash = null;
         return null;
 
       case 'cmd_connect':
@@ -394,9 +415,14 @@ class AndroidWebEngine {
 
       case 'cmd_check_connection': {
         try {
+          if (this.state.hasAuthorizedSession === false && !this.currentUserId) {
+            return false;
+          }
           const client = await this.ensureClient();
           const me = await client.getMe();
           this.currentUserId = String(me.id);
+          this.state.hasAuthorizedSession = true;
+          this.saveState();
           return true;
         } catch {
           return false;
@@ -413,6 +439,8 @@ class AndroidWebEngine {
         const res = await client.sendCode({ phone });
         if (res instanceof User) {
           this.currentUserId = String(res.id);
+          this.state.hasAuthorizedSession = true;
+          this.saveState();
           return { status: 'authorized', delivery: 'telegram_app', numericCode: true };
         }
         this.pendingAuth.phoneCodeHash = (res as SentCode).phoneCodeHash;
@@ -435,13 +463,18 @@ class AndroidWebEngine {
 
       case 'cmd_auth_sign_in': {
         const client = await this.ensureClient();
+        if (!this.pendingAuth.phone || !this.pendingAuth.phoneCodeHash) {
+          throw new Error('NO_ACTIVE_CODE_REQUEST');
+        }
         try {
           const user = await client.signIn({
-            phone: this.pendingAuth.phone!,
-            phoneCodeHash: this.pendingAuth.phoneCodeHash!,
+            phone: this.pendingAuth.phone,
+            phoneCodeHash: this.pendingAuth.phoneCodeHash,
             phoneCode: String(args.code ?? '').trim(),
           });
           this.currentUserId = String(user.id);
+          this.state.hasAuthorizedSession = true;
+          this.saveState();
           return { success: true };
         } catch (err) {
           if (String(err).includes('SESSION_PASSWORD_NEEDED') || String(err).toLowerCase().includes('password')) {
@@ -454,12 +487,21 @@ class AndroidWebEngine {
       case 'cmd_auth_check_password': {
         const pw = String(args.password ?? '');
         if (this.qrState.needsPassword && this.qrState.providePassword) {
-          this.qrState.providePassword(pw);
+          const providePw = this.qrState.providePassword;
+          this.qrState.providePassword = undefined;
+          this.qrState.needsPassword = false;
+          const verified = new Promise<void>((resolve, reject) => {
+            this.qrState.pendingPasswordResult = { resolve, reject };
+          });
+          providePw(pw);
+          await verified;
           return { success: true };
         }
         const client = await this.ensureClient();
         const user = await client.checkPassword(pw);
         this.currentUserId = String(user.id);
+        this.state.hasAuthorizedSession = true;
+        this.saveState();
         return { success: true };
       }
 
@@ -478,29 +520,57 @@ class AndroidWebEngine {
         };
         const client = await this.ensureClient(apiId, apiHash);
         return await new Promise<string>((resolve, reject) => {
-          const timer = window.setTimeout(() => reject(new Error('QR_GENERATION_TIMEOUT')), 20_000);
+          let settledFirstUrl = false;
+          const timer = window.setTimeout(() => {
+            if (!settledFirstUrl) {
+              settledFirstUrl = true;
+              abort.abort();
+              reject(new Error('QR_GENERATION_TIMEOUT'));
+            }
+          }, 20_000);
+
           void client
             .signInQr({
               abortSignal: abort.signal,
               onUrlUpdated: url => {
                 this.qrState.latestUrl = url;
-                window.clearTimeout(timer);
-                resolve(url);
+                if (!settledFirstUrl) {
+                  settledFirstUrl = true;
+                  window.clearTimeout(timer);
+                  resolve(url);
+                }
               },
               password: () =>
                 new Promise<string>(resPw => {
                   this.qrState.needsPassword = true;
                   this.qrState.providePassword = resPw;
                 }),
+              invalidPasswordCallback: () => {
+                const pending = this.qrState.pendingPasswordResult;
+                this.qrState.pendingPasswordResult = undefined;
+                pending?.reject(new Error('PASSWORD_HASH_INVALID'));
+              },
             })
             .then(user => {
               this.currentUserId = String(user.id);
+              this.state.hasAuthorizedSession = true;
+              this.saveState();
               this.qrState.authorized = true;
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              pending?.resolve();
             })
             .catch(err => {
               window.clearTimeout(timer);
-              this.qrState.error = err instanceof Error ? err.message : String(err);
-              reject(err);
+              const normalized = err instanceof Error ? err : new Error(String(err));
+              this.qrState.error = normalized.message;
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              pending?.reject(normalized);
+              if (!settledFirstUrl) {
+                settledFirstUrl = true;
+                reject(normalized);
+              }
             });
         });
       }
@@ -513,6 +583,7 @@ class AndroidWebEngine {
 
       case 'cmd_logout': {
         let revoked = false;
+        this.qrState.abort?.abort();
         if (this.client) {
           try {
             await this.client.logOut();
@@ -522,8 +593,11 @@ class AndroidWebEngine {
           }
           await this.client.destroy().catch(() => undefined);
           this.client = null;
+          this.currentApiHash = null;
         }
         this.currentUserId = null;
+        this.state.hasAuthorizedSession = false;
+        this.saveState();
         this.vault.lock();
         return { signed_out: true, remote_session_revoked: revoked };
       }
@@ -978,46 +1052,60 @@ class AndroidWebEngine {
         this.activeAborts.set(transferId, abort);
 
         try {
-          let fileBytes: Uint8Array;
-          let originalName = rawPath.split(/[\\/]/).pop() || 'upload.bin';
-
-          const browserFile = this.pendingFilesByPath.get(rawPath);
-          if (browserFile) {
-            originalName = browserFile.name;
-            fileBytes = new Uint8Array(await browserFile.arrayBuffer());
-          } else if (isAndroidNative()) {
-            const readRes = await TelegramDriveNative.readFileBase64({ path: rawPath });
-            originalName = readRes.name || originalName;
-            fileBytes = base64ToUint8(readRes.data);
-          } else {
-            throw new Error('FILE_UNREADABLE');
-          }
-
           const protectionMode = (req.protection_mode ?? args.protectionMode) as string | undefined;
           const isEncrypted = protectionMode === 'vault' || protectionMode === 'passphrase';
-          let uploadData = fileBytes;
+          let originalName = rawPath.split(/[\\/]/).pop() || 'upload.bin';
+          let originalSize = 0;
+          let uploadSource: File | Uint8Array;
+          let uploadByteLength = 0;
           let uploadName = originalName;
           let vaultId: string | undefined;
 
-          if (isEncrypted) {
-            const enc = this.vault.encryptBuffer(fileBytes, {
-              mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
-              promptToken: (req.prompt_token ?? args.promptToken) as number | undefined,
-              originalName,
-              originalMime: guessMimeType(originalName),
-              protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
-            });
-            uploadData = enc.ciphertext;
-            uploadName = enc.uploadFileName;
-            vaultId = enc.vaultId;
+          const browserFile = this.pendingFilesByPath.get(rawPath);
+          if (browserFile && !isEncrypted) {
+            originalName = browserFile.name;
+            originalSize = browserFile.size;
+            uploadName = originalName;
+            uploadSource = browserFile;
+            uploadByteLength = browserFile.size;
+          } else {
+            let fileBytes: Uint8Array;
+            if (browserFile) {
+              originalName = browserFile.name;
+              fileBytes = new Uint8Array(await browserFile.arrayBuffer());
+            } else if (isAndroidNative()) {
+              const readRes = await TelegramDriveNative.readFileBase64({ path: rawPath });
+              originalName = readRes.name || originalName;
+              fileBytes = base64ToUint8(readRes.data);
+            } else {
+              throw new Error('FILE_UNREADABLE');
+            }
+            originalSize = fileBytes.byteLength;
+            uploadSource = fileBytes;
+            uploadByteLength = fileBytes.byteLength;
+            uploadName = originalName;
+
+            if (isEncrypted) {
+              const enc = this.vault.encryptBuffer(fileBytes, {
+                mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+                promptToken: (req.prompt_token ?? args.promptToken) as number | undefined,
+                originalName,
+                originalMime: guessMimeType(originalName),
+                protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
+              });
+              uploadSource = enc.ciphertext;
+              uploadByteLength = enc.ciphertext.byteLength;
+              uploadName = enc.uploadFileName;
+              vaultId = enc.vaultId;
+            }
           }
 
           const client = await this.ensureClient();
           const t0 = Date.now();
           const uploaded = await client.uploadFile({
-            file: uploadData,
+            file: uploadSource,
             fileName: uploadName,
-            fileSize: uploadData.byteLength,
+            fileSize: uploadByteLength,
             fileMime: isEncrypted ? 'application/octet-stream' : guessMimeType(originalName),
             abortSignal: abort.signal,
             progressCallback: (done, tot) => {
@@ -1026,7 +1114,7 @@ class AndroidWebEngine {
                 id: transferId,
                 progress: tot > 0 ? Math.min(99, Math.round((done / tot) * 100)) : 0,
                 uploaded_bytes: done,
-                total_bytes: tot || uploadData.byteLength,
+                total_bytes: tot || uploadByteLength,
                 speed_bytes_per_sec: speed,
               });
             },
@@ -1038,7 +1126,7 @@ class AndroidWebEngine {
             fileName: uploadName,
             caption: isEncrypted ? '' : originalName,
           });
-          this.state.bandwidth.uploaded += uploadData.byteLength;
+          this.state.bandwidth.uploaded += uploadByteLength;
 
           if (isEncrypted) {
             this.vault.registerEncryptedFile({
@@ -1046,7 +1134,7 @@ class AndroidWebEngine {
               mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
               vaultId,
               originalName,
-              originalSize: fileBytes.byteLength,
+              originalSize,
               protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
             });
           }
@@ -1054,8 +1142,8 @@ class AndroidWebEngine {
           dispatchLocalEvent('upload-progress', {
             id: transferId,
             progress: 100,
-            uploaded_bytes: uploadData.byteLength,
-            total_bytes: uploadData.byteLength,
+            uploaded_bytes: uploadByteLength,
+            total_bytes: uploadByteLength,
             speed_bytes_per_sec: 0,
           });
           return sent.id;

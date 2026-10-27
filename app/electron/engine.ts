@@ -224,6 +224,7 @@ export class DesktopEngine {
   private saveTimer: NodeJS.Timeout | null = null;
 
   private client: TelegramClient | null = null;
+  private currentApiHash: string | null = null;
   private currentUserId: string | null = null;
   private pendingAuth: {
     phone?: string;
@@ -239,6 +240,10 @@ export class DesktopEngine {
     error: string | null;
     abort: AbortController | null;
     providePassword?: (pw: string) => void;
+    pendingPasswordResult?: {
+      resolve: () => void;
+      reject: (err: Error) => void;
+    };
   } = {
     latestUrl: null,
     scanned: false,
@@ -461,19 +466,20 @@ export class DesktopEngine {
       throw new Error('API_CREDENTIALS_MISSING');
     }
 
-    if (this.client && this.db.apiId === resolvedId) {
+    if (this.client && this.db.apiId === resolvedId && this.currentApiHash === resolvedHash) {
       return this.client;
     }
 
     if (this.client) {
       await this.client.destroy().catch(() => undefined);
       this.client = null;
+      this.currentApiHash = null;
     }
 
     this.db.apiId = resolvedId;
     this.scheduleSave();
 
-    const client = createNodeTelegramClient({
+    const client = await createNodeTelegramClient({
       apiId: resolvedId,
       apiHash: resolvedHash,
       getProxy: () => (this.db.proxy.enabled ? this.db.proxy : null),
@@ -489,6 +495,7 @@ export class DesktopEngine {
     }
 
     this.client = client;
+    this.currentApiHash = resolvedHash;
     return client;
   }
 
@@ -1157,6 +1164,7 @@ export class DesktopEngine {
         return readEncryptedSecretFile(this.apiHashFilePath);
       case 'cmd_clear_api_hash':
         fs.rmSync(this.apiHashFilePath, { force: true });
+        this.currentApiHash = null;
         return null;
 
       case 'cmd_connect': {
@@ -1245,7 +1253,14 @@ export class DesktopEngine {
       case 'cmd_auth_check_password': {
         const password = String(args.password ?? '');
         if (this.qrState.needsPassword && this.qrState.providePassword) {
-          this.qrState.providePassword(password);
+          const providePw = this.qrState.providePassword;
+          this.qrState.providePassword = undefined;
+          this.qrState.needsPassword = false;
+          const verified = new Promise<void>((resolve, reject) => {
+            this.qrState.pendingPasswordResult = { resolve, reject };
+          });
+          providePw(password);
+          await verified;
           return { success: true };
         }
         const client = await this.ensureClient();
@@ -1272,14 +1287,25 @@ export class DesktopEngine {
         const client = await this.ensureClient(apiId, apiHash);
 
         const firstUrlPromise = new Promise<string>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('QR_GENERATION_TIMEOUT')), 20_000);
+          let settledFirstUrl = false;
+          const timer = setTimeout(() => {
+            if (!settledFirstUrl) {
+              settledFirstUrl = true;
+              abort.abort();
+              reject(new Error('QR_GENERATION_TIMEOUT'));
+            }
+          }, 20_000);
+
           void client
             .signInQr({
               abortSignal: abort.signal,
               onUrlUpdated: url => {
                 this.qrState.latestUrl = url;
-                clearTimeout(timer);
-                resolve(url);
+                if (!settledFirstUrl) {
+                  settledFirstUrl = true;
+                  clearTimeout(timer);
+                  resolve(url);
+                }
               },
               onQrScanned: () => {
                 this.qrState.scanned = true;
@@ -1289,16 +1315,31 @@ export class DesktopEngine {
                   this.qrState.needsPassword = true;
                   this.qrState.providePassword = resPw;
                 }),
+              invalidPasswordCallback: () => {
+                const pending = this.qrState.pendingPasswordResult;
+                this.qrState.pendingPasswordResult = undefined;
+                pending?.reject(new Error('PASSWORD_HASH_INVALID'));
+              },
             })
             .then(async user => {
               this.currentUserId = String(user.id);
-              this.qrState.authorized = true;
               await this.persistMtprotoSession();
+              this.qrState.authorized = true;
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              pending?.resolve();
             })
             .catch(err => {
               clearTimeout(timer);
-              this.qrState.error = err instanceof Error ? err.message : String(err);
-              reject(err);
+              const normalized = err instanceof Error ? err : new Error(String(err));
+              this.qrState.error = normalized.message;
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              pending?.reject(normalized);
+              if (!settledFirstUrl) {
+                settledFirstUrl = true;
+                reject(normalized);
+              }
             });
         });
 
@@ -1320,6 +1361,7 @@ export class DesktopEngine {
 
       case 'cmd_logout': {
         let remoteRevoked = false;
+        this.qrState.abort?.abort();
         if (this.client) {
           try {
             await this.client.logOut();
@@ -1329,6 +1371,7 @@ export class DesktopEngine {
           }
           await this.client.destroy().catch(() => undefined);
           this.client = null;
+          this.currentApiHash = null;
         }
         this.currentUserId = null;
         this.filesCache.clear();
@@ -2915,6 +2958,7 @@ export class DesktopEngine {
           await this.persistMtprotoSession();
           await this.client.destroy().catch(() => undefined);
           this.client = null;
+          this.currentApiHash = null;
         }
         if (this.db.apiId) {
           const client = await this.ensureClient(this.db.apiId);

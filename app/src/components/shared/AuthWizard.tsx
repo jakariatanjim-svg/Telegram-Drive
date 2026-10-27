@@ -215,17 +215,24 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
 
         qrPollRef.current = setInterval(async () => {
             try {
-                const pollResult = await invoke<{ success: boolean; next_step?: string }>("cmd_auth_qr_poll");
-                if (pollResult.success) {
-                    setQrPolling(false);
-                    if (pollResult.next_step === "password") {
-                        setStep("password");
-                    } else {
-                        onLogin();
-                    }
+                const pollResult = await invoke<{ success: boolean; next_step?: string; url?: string | null }>("cmd_auth_qr_poll");
+                if (pollResult.url) {
+                    setQrUrl(prev => (pollResult.url && pollResult.url !== prev ? pollResult.url : prev));
                 }
-            } catch {
-                // Telegram may briefly reject a poll while rotating the QR token.
+                if (pollResult.next_step === "password") {
+                    setQrPolling(false);
+                    setStep("password");
+                } else if (pollResult.success) {
+                    setQrPolling(false);
+                    onLogin();
+                }
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (/API_ID_INVALID|API_CREDENTIALS_MISSING/i.test(msg)) {
+                    setQrPolling(false);
+                    handleAuthError(err);
+                }
+                // Otherwise ignore transient errors while Telegram rotates the QR token.
             }
         }, 3000);
 
