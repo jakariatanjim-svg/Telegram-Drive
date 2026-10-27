@@ -51,6 +51,7 @@ class TelegramDrivePlugin : Plugin() {
     companion object {
         private const val KEYSTORE_ALIAS = "telegram_drive_keystore_v1"
         private const val PREFS_NAME = "telegram_drive_secure_prefs"
+        private val keystoreLock = Any()
         val sharedCachedFiles = mutableListOf<SharedCachedEntry>()
     }
 
@@ -63,7 +64,7 @@ class TelegramDrivePlugin : Plugin() {
 
     private val ioExecutor = Executors.newCachedThreadPool()
 
-    private fun getOrCreateSecretKey(): SecretKey {
+    private fun getOrCreateSecretKey(): SecretKey = synchronized(keystoreLock) {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val existing = ks.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
         if (existing != null) return existing.secretKey
@@ -88,61 +89,82 @@ class TelegramDrivePlugin : Plugin() {
     fun secureSet(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key")
         val value = call.getString("value") ?: ""
-        try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
-            val iv = Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
-            val ct = Base64.encodeToString(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(key, "$iv:$ct")
-                .apply()
-            call.resolve()
-        } catch (e: Exception) {
-            call.reject("Keystore encrypt failed: ${e.message}")
+        val appCtx = context.applicationContext
+        ioExecutor.execute {
+            try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.ENCRYPT_MODE, getOrCreateSecretKey())
+                val iv = Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
+                val ct = Base64.encodeToString(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+                appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(key, "$iv:$ct")
+                    .apply()
+                call.resolve()
+            } catch (t: Throwable) {
+                call.reject("Keystore encrypt failed: ${t.message}")
+            }
         }
     }
 
     @PluginMethod
     fun secureGet(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key")
-        val ret = JSObject()
-        try {
-            val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(key, null)
-            if (raw == null || !raw.contains(":")) {
+        val appCtx = context.applicationContext
+        ioExecutor.execute {
+            val ret = JSObject()
+            try {
+                val raw = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(key, null)
+                if (raw == null || !raw.contains(":")) {
+                    ret.put("value", JSObject.NULL)
+                    call.resolve(ret)
+                    return@execute
+                }
+                val parts = raw.split(":", limit = 2)
+                val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+                val ct = Base64.decode(parts[1], Base64.NO_WRAP)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), GCMParameterSpec(128, iv))
+                val plain = String(cipher.doFinal(ct), Charsets.UTF_8)
+                ret.put("value", plain)
+                call.resolve(ret)
+            } catch (_: Throwable) {
                 ret.put("value", JSObject.NULL)
-                return call.resolve(ret)
+                call.resolve(ret)
             }
-            val parts = raw.split(":", limit = 2)
-            val iv = Base64.decode(parts[0], Base64.NO_WRAP)
-            val ct = Base64.decode(parts[1], Base64.NO_WRAP)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateSecretKey(), GCMParameterSpec(128, iv))
-            val plain = String(cipher.doFinal(ct), Charsets.UTF_8)
-            ret.put("value", plain)
-            call.resolve(ret)
-        } catch (_: Exception) {
-            ret.put("value", JSObject.NULL)
-            call.resolve(ret)
         }
     }
 
     @PluginMethod
     fun secureRemove(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key")
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .remove(key)
-            .apply()
-        call.resolve()
+        val appCtx = context.applicationContext
+        ioExecutor.execute {
+            try {
+                appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .remove(key)
+                    .apply()
+                call.resolve()
+            } catch (t: Throwable) {
+                call.reject("Keystore remove failed: ${t.message}")
+            }
+        }
     }
 
     @PluginMethod
     fun isBiometricAvailable(call: PluginCall) {
-        val authenticators =
-            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        val canAuth = BiometricManager.from(context).canAuthenticate(authenticators)
-        call.resolve(JSObject().put("available", canAuth == BiometricManager.BIOMETRIC_SUCCESS))
+        val appCtx = context.applicationContext
+        ioExecutor.execute {
+            try {
+                val authenticators =
+                    BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                val canAuth = BiometricManager.from(appCtx).canAuthenticate(authenticators)
+                call.resolve(JSObject().put("available", canAuth == BiometricManager.BIOMETRIC_SUCCESS))
+            } catch (_: Throwable) {
+                call.resolve(JSObject().put("available", false))
+            }
+        }
     }
 
     @PluginMethod
@@ -196,47 +218,60 @@ class TelegramDrivePlugin : Plugin() {
 
     @PluginMethod
     fun getTransferEnvironment(call: PluginCall) {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val activeNet = cm.activeNetwork
-        val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
-        val connected = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
-        val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-        val roaming = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING) == false
-        val metered = cm.isActiveNetworkMetered
+        val appCtx = context.applicationContext
+        ioExecutor.execute {
+            try {
+                val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val activeNet = cm.activeNetwork
+                val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
+                val connected = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+                val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                val roaming = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING) == false
+                val metered = cm.isActiveNetworkMetered
 
-        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) ?: 100
-        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
-        val pct = if (scale > 0) (level * 100) / scale else 100
-        val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-            status == BatteryManager.BATTERY_STATUS_FULL
+                val batteryIntent = appCtx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) ?: 100
+                val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+                val pct = if (scale > 0) (level * 100) / scale else 100
+                val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+                val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
 
-        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-        val statFs = StatFs(context.filesDir.absolutePath)
-        val availBytes = statFs.availableBytes
+                val pm = appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val statFs = StatFs(appCtx.filesDir.absolutePath)
+                val availBytes = statFs.availableBytes
 
-        val notifPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
-            ) "granted" else "prompt"
-        } else {
-            "granted"
+                val notifPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    if (ContextCompat.checkSelfPermission(appCtx, Manifest.permission.POST_NOTIFICATIONS) ==
+                        PackageManager.PERMISSION_GRANTED
+                    ) "granted" else "prompt"
+                } else {
+                    "granted"
+                }
+
+                val ret = JSObject().apply {
+                    put("connected", connected)
+                    put("metered", metered)
+                    put("roaming", roaming)
+                    put("charging", charging)
+                    put("batteryLow", pct <= 15)
+                    put("storageLow", availBytes < 256L * 1024L * 1024L)
+                    put("freeBytes", availBytes)
+                    put("powerSaveMode", pm.isPowerSaveMode)
+                    put("backgroundRestricted", false)
+                    put("network_connected", connected)
+                    put("wifi_connected", wifi)
+                    put("battery_percent", pct)
+                    put("power_save_mode", pm.isPowerSaveMode)
+                    put("available_storage_bytes", availBytes)
+                    put("notification_permission", notifPerm)
+                    put("recovery_supported", true)
+                }
+                call.resolve(ret)
+            } catch (t: Throwable) {
+                call.reject("Transfer environment query failed: ${t.message}")
+            }
         }
-
-        val ret = JSObject().apply {
-            put("network_connected", connected)
-            put("wifi_connected", wifi)
-            put("roaming", roaming)
-            put("metered", metered)
-            put("battery_percent", pct)
-            put("charging", charging)
-            put("power_save_mode", pm.isPowerSaveMode)
-            put("available_storage_bytes", availBytes)
-            put("notification_permission", notifPerm)
-            put("recovery_supported", true)
-        }
-        call.resolve(ret)
     }
 
     @PluginMethod

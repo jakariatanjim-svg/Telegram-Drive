@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { type as osType } from '@tauri-apps/plugin-os';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSyncConflicts, getSyncPairs, getSyncSettings, getSyncStatus } from '../services/syncService';
 import { getCurrentAccountId } from '../services/currentAccount';
@@ -14,7 +15,20 @@ export const syncQueryKeys = {
 export function useSyncEngine() {
   const queryClient = useQueryClient();
   const [accountGeneration, setAccountGeneration] = useState(0);
-  const account = useQuery({ queryKey: ['folder-sync', 'account', accountGeneration], queryFn: getCurrentAccountId, retry: false, refetchInterval: 5_000 });
+  const [isDesktop] = useState(() => {
+    try {
+      return osType() !== 'android';
+    } catch {
+      return true;
+    }
+  });
+  const account = useQuery({
+    queryKey: ['folder-sync', 'account', accountGeneration],
+    queryFn: getCurrentAccountId,
+    enabled: isDesktop,
+    retry: false,
+    refetchInterval: isDesktop ? 5_000 : false,
+  });
   useEffect(() => queryClient.getQueryCache().subscribe(event => {
     // Logout clears the cache while this application-wide provider remains mounted.
     // Replace its observer immediately so removed A data cannot survive into B's UI.

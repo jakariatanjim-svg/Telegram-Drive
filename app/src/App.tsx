@@ -8,10 +8,12 @@ import { useUpdates } from "./context/UpdateContext";
 import "./App.css";
 
 const DesktopDashboard = React.lazy(() => import("./components/desktop/DesktopDashboard").then(m => ({ default: m.Dashboard })));
+const MobileDashboard = React.lazy(() => import("./components/mobile/MobileDashboard"));
 const AuthWizard = React.lazy(() => import("./components/shared/AuthWizard").then(m => ({ default: m.AuthWizard })));
 
 import { Toaster } from "sonner";
 import { useTheme } from "./context/ThemeContext";
+import { usePlatform } from "./hooks/usePlatform";
 import { TelegramCooldownBanner } from "./components/shared/TelegramCooldownBanner";
 const WhatsNewDialog = React.lazy(() => import("./components/shared/WhatsNewDialog").then(m => ({ default: m.WhatsNewDialog })));
 import { useSettings } from "./context/SettingsContext";
@@ -41,6 +43,7 @@ function AppContent() {
   });
   const [whatsNew, setWhatsNew] = useState<WhatsNewDetails | null>(() => consumeWhatsNew(appVersion));
   const { theme } = useTheme();
+  const { isMobile } = usePlatform();
   const { available, version, downloading, progress, phase, downloadAndInstall, dismissUpdate } = useUpdates();
   const { settings, updateSetting, isLoaded, persistenceStatus, retryPersistence } = useSettings();
   const { i18n, t } = useTranslation();
@@ -210,7 +213,11 @@ function AppContent() {
           </div>
         }>
           <ErrorBoundary>
-            <DesktopDashboard onLogout={() => setAuthStatus("unauthenticated")} />
+            {isMobile ? (
+              <MobileDashboard onLogout={() => setAuthStatus("unauthenticated")} />
+            ) : (
+              <DesktopDashboard onLogout={() => setAuthStatus("unauthenticated")} />
+            )}
           </ErrorBoundary>
         </Suspense>
       )}

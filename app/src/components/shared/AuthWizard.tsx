@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
 import { ShieldCheck, Sun, Moon, ExternalLink, X } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
@@ -37,7 +37,7 @@ function AuthThemeToggle() {
 }
 export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const { t } = useTranslation();
-    const isBrowser = typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window);
+    const isBrowser = typeof window !== 'undefined' && !isTauri();
 
     if (isBrowser) {
         return (
@@ -55,8 +55,14 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                 </div>
               </div>
             </div>
-        )
+        );
     }
+
+    return <AuthWizardForm onLogin={onLogin} />;
+}
+
+function AuthWizardForm({ onLogin }: { onLogin: () => void }) {
+    const { t } = useTranslation();
 
     const [step, setStep] = useState<AuthStep>("setup");
     const [loading, setLoading] = useState(false);

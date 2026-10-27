@@ -14,7 +14,6 @@ class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TelegramDrivePlugin::class.java)
         super.onCreate(savedInstanceState)
-        handleIncomingIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {

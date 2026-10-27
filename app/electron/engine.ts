@@ -494,10 +494,7 @@ export class DesktopEngine {
 
   private async getAccountOwnerId(): Promise<string> {
     if (this.currentUserId) return this.currentUserId;
-    if (!this.client) throw new Error('NOT_CONNECTED');
-    const me = await this.client.getMe();
-    this.currentUserId = String(me.id);
-    return this.currentUserId;
+    throw new Error('NOT_CONNECTED');
   }
 
   private async fetchSingleMessage(folderId: number | null, messageId: number): Promise<Message> {
@@ -582,23 +579,35 @@ export class DesktopEngine {
     return merged;
   }
 
-  private async listFolderFiles(folderId: number | null): Promise<MappedTelegramFile[]> {
+  private async listFolderFiles(
+    folderId: number | null,
+    onChunk?: (chunk: MappedTelegramFile[]) => void,
+  ): Promise<MappedTelegramFile[]> {
     const client = await this.ensureClient();
     const peer = folderIdToPeer(folderId);
     const out: MappedTelegramFile[] = [];
+    const vaultUnlocked = this.vault.getStatus().is_unlocked;
     let offset: { id: number; date: number } | undefined;
 
     for (let page = 0; page < 5; page++) {
       const history = await client.getHistory(peer, { limit: 100, offset });
       if (history.length === 0) break;
+      const pageFiles: MappedTelegramFile[] = [];
       for (const msg of history) {
         const key = fileCompositeKey(folderId, msg.id);
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.db.fileRenames[key],
           favorite: this.db.favorites.includes(key),
           encryptedRecord: this.vault.getEncryptedFileRecord(key),
+          vaultUnlocked,
         });
-        if (mapped) out.push(mapped);
+        if (mapped) {
+          out.push(mapped);
+          pageFiles.push(mapped);
+        }
+      }
+      if (pageFiles.length > 0 && onChunk) {
+        onChunk(pageFiles);
       }
       if (!history.next) break;
       offset = history.next;
@@ -1344,6 +1353,7 @@ export class DesktopEngine {
             const totalSize = cached.reduce((s, item) => s + (item.size || 0), 0);
             return {
               ...f,
+              display_order: f.sort_order,
               file_count: cached.length,
               total_size: totalSize,
               total_size_str: formatByteSize(totalSize),
@@ -1400,8 +1410,9 @@ export class DesktopEngine {
         return null;
       }
 
-      case 'cmd_set_folder_group': {
-        const folderId = Number(args.folderId);
+      case 'cmd_set_folder_group':
+      case 'cmd_assign_folder_to_group': {
+        const folderId = Number(args.folderId ?? args.channelId);
         const groupId = args.groupId === null || args.groupId === undefined ? null : Number(args.groupId);
         const found = this.db.folders.find(f => f.id === folderId);
         if (found) found.group_id = groupId;
@@ -1410,7 +1421,9 @@ export class DesktopEngine {
       }
 
       case 'cmd_get_groups':
-        return [...this.db.groups].sort((a, b) => a.sort_order - b.sort_order);
+        return [...this.db.groups]
+          .sort((a, b) => a.sort_order - b.sort_order)
+          .map(g => ({ ...g, display_order: g.sort_order }));
 
       case 'cmd_create_group': {
         const id = Date.now();
@@ -1422,6 +1435,16 @@ export class DesktopEngine {
         });
         this.scheduleSave();
         return id;
+      }
+
+      case 'cmd_update_group': {
+        const g = this.db.groups.find(item => item.id === Number(args.groupId));
+        if (g) {
+          if (args.name !== undefined) g.name = String(args.name);
+          if (args.colorHex !== undefined) g.color_hex = String(args.colorHex);
+        }
+        this.scheduleSave();
+        return null;
       }
 
       case 'cmd_rename_group': {
@@ -1456,10 +1479,65 @@ export class DesktopEngine {
       }
 
       // ── Files, Thumbnails, Previews & Archives ─────────────────────
+      case 'cmd_get_cached_files': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        return this.filesCache.get(String(folderId ?? 'saved')) ?? [];
+      }
+
       case 'cmd_get_files': {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
-        return await this.listFolderFiles(folderId);
+        const ownerId =
+          typeof args.ownerId === 'string' && args.ownerId
+            ? args.ownerId
+            : (this.currentUserId ?? '');
+        const requestId = typeof args.requestId === 'string' ? args.requestId : '';
+        const files = await this.listFolderFiles(folderId, chunk => {
+          this.emitEvent('folder-load-chunk', {
+            ownerId,
+            folderId,
+            requestId,
+            files: chunk,
+          });
+        });
+        return {
+          ownerId,
+          folderId,
+          requestId,
+          files,
+          complete: true,
+        };
+      }
+
+      case 'cmd_get_offline_files':
+      case 'cmd_get_file_activity':
+      case 'cmd_list_cached_files':
+        return [];
+
+      case 'cmd_touch_file_inventory':
+      case 'cmd_record_file_opened':
+      case 'cmd_set_file_activity_flag':
+        return null;
+
+      case 'cmd_get_storage_insight': {
+        const ownerId = this.currentUserId ?? '';
+        const allFiles = ownerId ? this.collectAllWorkspaceFiles(ownerId) : [];
+        const bySizeKey = new Map<string, number>();
+        for (const f of allFiles) {
+          const k = `${f.name}:${f.size}`;
+          bySizeKey.set(k, (bySizeKey.get(k) ?? 0) + 1);
+        }
+        let duplicateGroups = 0;
+        for (const count of bySizeKey.values()) {
+          if (count > 1) duplicateGroups++;
+        }
+        return {
+          files: allFiles,
+          complete: true,
+          scanned_count: allFiles.length,
+          duplicate_groups: duplicateGroups,
+        };
       }
 
       case 'cmd_search_files': {
@@ -1600,6 +1678,7 @@ export class DesktopEngine {
         return null;
       }
 
+      case 'cmd_get_display_preview':
       case 'cmd_get_preview': {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
@@ -1617,7 +1696,15 @@ export class DesktopEngine {
         );
         if (fs.existsSync(previewPath)) return previewPath;
 
-        const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId);
+        const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId, (done, total) => {
+          this.emitEvent('preview-progress', {
+            folder_id: folderId,
+            message_id: messageId,
+            downloaded_bytes: done,
+            total_bytes: total,
+            percent: total > 0 ? Math.min(99, Math.round((done / total) * 99)) : 0,
+          });
+        });
         const plain = VaultRuntime.hasEncryptedMagic(rawBytes)
           ? this.vault.decryptBuffer(rawBytes, {
               promptToken: typeof args.promptToken === 'number' ? args.promptToken : undefined,
@@ -1653,6 +1740,7 @@ export class DesktopEngine {
         return null;
       }
 
+      case 'cmd_list_archive_contents':
       case 'cmd_list_archive_entries': {
         const previewPath = String(
           await this.invoke('cmd_get_preview', {
@@ -1987,7 +2075,7 @@ export class DesktopEngine {
         return this.vault.getSettings();
       case 'cmd_update_encryption_settings': {
         const updated = this.vault.updateSettings(
-          (args.settings as Partial<VaultStateSettings>) ?? {},
+          (args.settings as Record<string, unknown>) ?? {},
         );
         this.scheduleSave();
         return updated;
@@ -1995,6 +2083,7 @@ export class DesktopEngine {
       case 'cmd_create_vault':
         this.vault.createVault(String(args.passphrase ?? ''));
         this.scheduleSave();
+        this.emitEvent('vault-unlocked', {});
         return null;
       case 'cmd_unlock_vault': {
         const sid = this.vault.unlock(String(args.passphrase ?? ''));
@@ -2004,10 +2093,12 @@ export class DesktopEngine {
           }
         }
         this.pumpTransferQueue();
+        this.emitEvent('vault-unlocked', {});
         return sid;
       }
       case 'cmd_lock_vault':
         this.vault.lock();
+        this.emitEvent('vault-locked', {});
         return null;
       case 'cmd_record_vault_activity':
         this.vault.recordActivity();
@@ -2021,21 +2112,27 @@ export class DesktopEngine {
         return null;
       case 'cmd_generate_recovery_key':
         return this.vault.generateRecoveryKey();
-      case 'cmd_export_vault_recovery':
+      case 'cmd_export_vault_recovery': {
+        if (args.recoveryPassphrase !== undefined) {
+          return this.vault.exportVaultRecovery(String(args.recoveryPassphrase ?? ''));
+        }
         return this.vault.exportVaultRecovery(
           String(args.currentPassphrase ?? ''),
           String(args.recoveryKey ?? ''),
         );
+      }
       case 'cmd_verify_vault_recovery':
         return this.vault.verifyVaultRecovery(
-          String(args.recoveryJson ?? ''),
-          String(args.recoveryKey ?? ''),
+          String(args.bundleBase64 ?? args.recoveryJson ?? ''),
+          String(args.recoveryPassphrase ?? args.recoveryKey ?? ''),
         );
       case 'cmd_import_vault_recovery':
         this.vault.importVaultRecovery(
-          String(args.recoveryJson ?? ''),
-          String(args.recoveryKey ?? ''),
-          String(args.newPassphrase ?? ''),
+          String(args.bundleBase64 ?? args.recoveryJson ?? ''),
+          String(args.recoveryPassphrase ?? args.recoveryKey ?? ''),
+          args.vaultPassphrase !== undefined || args.newPassphrase !== undefined
+            ? String(args.vaultPassphrase ?? args.newPassphrase ?? '')
+            : undefined,
         );
         this.scheduleSave();
         return null;
@@ -2651,13 +2748,63 @@ export class DesktopEngine {
         return null;
       }
 
+      case 'cmd_get_sync_settings':
+        return {
+          enabled: this.db.syncPairs.some(p => p.is_active),
+          scanner_enabled: false,
+          scan_interval_seconds: 300,
+        };
+
+      case 'cmd_toggle_sync': {
+        const enabled = Boolean(args.enabled);
+        for (const p of this.db.syncPairs) p.is_active = enabled;
+        this.refreshFolderWatchers();
+        this.scheduleSave();
+        this.emitEvent('sync-status-changed', {});
+        return {
+          enabled,
+          scanner_enabled: false,
+          scan_interval_seconds: 300,
+        };
+      }
+
+      case 'cmd_set_sync_scanner':
+        return {
+          enabled: this.db.syncPairs.some(p => p.is_active),
+          scanner_enabled: Boolean(args.scannerEnabled),
+          scan_interval_seconds: Number(args.scanIntervalSeconds ?? 300),
+        };
+
+      case 'cmd_get_sync_pairs': {
+        const ownerId = String(args.ownerId ?? '');
+        return this.db.syncPairs.filter(p => !ownerId || p.ownerId === ownerId);
+      }
+
       case 'cmd_get_sync_status': {
         const ownerId = String(args.ownerId ?? '');
         const pairs = this.db.syncPairs.filter(p => !ownerId || p.ownerId === ownerId);
+        const conflicts = this.db.syncConflicts.filter(c => !ownerId || c.ownerId === ownerId);
+        const activePairs = pairs.filter(p => p.is_active).length;
         return {
-          pairs,
-          is_syncing: false,
-          active_watchers: this.syncWatchers.size,
+          enabled: activePairs > 0,
+          running: this.syncWatchers.size > 0,
+          activePairs,
+          pendingOps: 0,
+          conflicts: conflicts.length,
+          lastError: null,
+          pairs: pairs.map(p => ({
+            pairId: p.id,
+            localPath: p.local_path,
+            channelId: p.channel_id,
+            label: p.label,
+            isActive: p.is_active,
+            syncDirection: p.sync_direction,
+            watching: this.syncWatchers.has(p.id),
+            syncing: false,
+            pendingCount: 0,
+            conflictCount: conflicts.filter(c => c.pair_id === p.id).length,
+            lastSyncedAt: p.last_synced_at,
+          })),
         };
       }
 
@@ -2813,9 +2960,61 @@ export class DesktopEngine {
 
       case 'cmd_get_bandwidth':
         return {
+          date: new Date().toISOString().slice(0, 10),
+          up_bytes: this.db.bandwidth.uploaded,
+          down_bytes: this.db.bandwidth.downloaded,
+          limit_bytes: 0,
+          period: 'weekly',
           uploaded_bytes: this.db.bandwidth.uploaded,
           downloaded_bytes: this.db.bandwidth.downloaded,
         };
+
+      case 'cmd_set_weekly_quota':
+      case 'cmd_migrate_proxy_secret':
+      case 'cmd_set_native_language':
+      case 'cmd_workspace_cancel_asset':
+        return null;
+
+      case 'cmd_workspace_asset': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const kind = String(args.kind ?? 'preview');
+        if (kind === 'thumbnail') {
+          const thumb = await this.invoke('cmd_get_thumbnail', { folderId, messageId });
+          return { path: thumb, cached: Boolean(thumb) };
+        }
+        const prev = await this.invoke('cmd_get_preview', {
+          folderId,
+          messageId,
+          promptToken: args.promptToken,
+        });
+        return { path: prev, cached: Boolean(prev) };
+      }
+
+      case 'cmd_get_detailed_transcode_cache':
+      case 'cmd_get_detailed_cache_info': {
+        const paths = getPortablePaths();
+        const previews = measureDirectory(paths.previewsCacheDir);
+        return {
+          entries: [],
+          total_bytes: previews.bytes,
+          max_bytes: Math.round(this.db.previewCacheMaxGb * 1024 * 1024 * 1024),
+          scan_in_progress: false,
+          last_scanned_at: Date.now(),
+          last_error: null,
+        };
+      }
+
+      case 'cmd_get_cache_info': {
+        const paths = getPortablePaths();
+        const previews = measureDirectory(paths.previewsCacheDir);
+        const thumbs = measureDirectory(paths.thumbnailsCacheDir);
+        return {
+          total_bytes: previews.bytes + thumbs.bytes,
+          file_count: previews.fileCount + thumbs.fileCount,
+        };
+      }
 
       case 'cmd_get_api_settings':
         return {

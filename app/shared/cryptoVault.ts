@@ -158,12 +158,39 @@ export class VaultRuntime {
     }
   }
 
-  getSettings(): VaultStateSettings {
-    return { ...this.settings };
+  getSettings() {
+    return {
+      defaultUploadMode: this.settings.defaultUploadMode,
+      protectMetadata: this.settings.protectMetadata,
+      lockTimeoutMinutes: this.settings.lockTimeoutMinutes,
+      lockOnSleep: this.settings.lockOnSleep,
+      default_mode: this.settings.defaultUploadMode,
+      protect_metadata: this.settings.protectMetadata,
+      auto_lock_minutes: this.settings.lockTimeoutMinutes,
+      lock_on_sleep: this.settings.lockOnSleep,
+      temp_policy: 'clean_on_close',
+      remember_device: false,
+    };
   }
 
-  updateSettings(next: Partial<VaultStateSettings>): VaultStateSettings {
-    this.settings = { ...this.settings, ...next };
+  updateSettings(next: Record<string, unknown>) {
+    const mode = (next.defaultUploadMode ?? next.default_mode) as VaultStateSettings['defaultUploadMode'] | undefined;
+    const protect = next.protectMetadata ?? next.protect_metadata;
+    const timeout = next.lockTimeoutMinutes ?? next.auto_lock_minutes;
+    const sleep = next.lockOnSleep ?? next.lock_on_sleep;
+
+    if (mode === 'standard' || mode === 'vault' || mode === 'passphrase') {
+      this.settings.defaultUploadMode = mode;
+    }
+    if (typeof protect === 'boolean') {
+      this.settings.protectMetadata = protect;
+    }
+    if (typeof timeout === 'number' && Number.isFinite(timeout)) {
+      this.settings.lockTimeoutMinutes = timeout;
+    }
+    if (typeof sleep === 'boolean') {
+      this.settings.lockOnSleep = sleep;
+    }
     return this.getSettings();
   }
 
@@ -171,50 +198,82 @@ export class VaultRuntime {
     this.checkIdleTimeout();
     if (!this.vault) {
       return {
+        exists: false,
+        is_unlocked: false,
+        session_id: null,
+        has_recovery: false,
+        created_at: null,
+        vault_id: null,
         state: 'uninitialized' as const,
         vaultId: null,
         sessionId: null,
       };
     }
-    if (this.unlockedMasterKey && this.sessionId !== null) {
-      return {
-        state: 'unlocked' as const,
-        vaultId: this.vault.vaultId,
-        sessionId: this.sessionId,
-      };
-    }
+    const unlocked = Boolean(this.unlockedMasterKey && this.sessionId !== null);
     return {
-      state: 'locked' as const,
+      exists: true,
+      is_unlocked: unlocked,
+      session_id: unlocked ? this.sessionId : null,
+      has_recovery: true,
+      created_at: this.vault.createdAt,
+      vault_id: unlocked ? this.vault.vaultId : null,
+      state: unlocked ? ('unlocked' as const) : ('locked' as const),
       vaultId: this.vault.vaultId,
-      sessionId: null,
+      sessionId: unlocked ? this.sessionId : null,
     };
   }
 
   getCapabilities() {
     return {
-      supported: true,
-      algorithms: ['XChaCha20-Poly1305', 'PBKDF2-HMAC-SHA256', 'HKDF-SHA256'],
-      streamingDecryption: true,
-      metadataProtection: true,
-      recoveryKit: true,
+      contract_version: 2,
+      app_version: '4.2',
+      backend_build_id: 'tgd-v1',
+      availability: 'ready' as const,
+      blockers: [] as string[],
+      vault_backend: 'persistent_file' as const,
+      readable_formats: [1],
+      writable_formats: [1],
+      features: {
+        upload: true,
+        read: true,
+        per_file_passphrase: true,
+        recovery: true,
+        share: true,
+        migration: false,
+      },
+      core_available: true,
+      mode_alpha: false,
+      upload_enabled: true,
+      read_enabled: true,
+      share_enabled: true,
+      migration_enabled: false,
+      supported_suites: [1],
+      envelope_version: 1,
     };
   }
 
   getInventory() {
-    let vaultProtectedFiles = 0;
-    let passphraseProtectedFiles = 0;
+    let totalFiles = 0;
+    let totalBytes = 0;
     for (const rec of this.encryptedFiles.values()) {
-      if (rec.mode === 'vault') vaultProtectedFiles++;
-      else passphraseProtectedFiles++;
+      totalFiles++;
+      totalBytes += rec.originalSize || 0;
     }
     return {
-      vaultConfigured: Boolean(this.vault),
-      vaultUnlocked: Boolean(this.unlockedMasterKey),
-      vaultId: this.vault?.vaultId ?? null,
-      vaultFingerprint: this.vault?.fingerprint ?? null,
-      vaultProtectedFiles,
-      passphraseProtectedFiles,
-      legacyEncryptedFiles: 0,
+      entries:
+        totalFiles > 0
+          ? [
+              {
+                envelope_version: 1,
+                file_count: totalFiles,
+                ciphertext_bytes: totalBytes,
+              },
+            ]
+          : [],
+      total_files: totalFiles,
+      total_ciphertext_bytes: totalBytes,
+      vault_exists: Boolean(this.vault),
+      experimental_format_quarantined: false,
     };
   }
 
@@ -316,24 +375,47 @@ export class VaultRuntime {
     return recoveryKey.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
   }
 
-  exportVaultRecovery(currentPassphrase: string, recoveryKey: string): string {
-    if (!this.vault) throw new Error('VAULT_NOT_INITIALIZED');
-    const oldSalt = hexToBytes(this.vault.saltHex);
-    const oldWrappingKey = deriveKeyFromPassphrase(currentPassphrase, oldSalt);
-    let masterKey: Uint8Array;
+  private decodeRecoveryInput(bundleOrJson: string): string {
+    const trimmed = bundleOrJson.trim();
+    if (trimmed.startsWith('{')) return trimmed;
     try {
-      masterKey = openBytes(
-        oldWrappingKey,
-        fromBase64(this.vault.wrappedMasterKeyB64),
-        utf8ToBytes(this.vault.vaultId),
-      );
+      return new TextDecoder().decode(fromBase64(trimmed));
     } catch {
-      throw new Error('INVALID_PASSPHRASE');
+      return trimmed;
     }
+  }
+
+  exportVaultRecovery(currentOrRecoveryPassphrase: string, maybeRecoveryKey?: string): string {
+    if (!this.vault) throw new Error('VAULT_NOT_INITIALIZED');
+    let masterKey: Uint8Array;
+    let recoveryPass: string;
+
+    if (maybeRecoveryKey !== undefined) {
+      const oldSalt = hexToBytes(this.vault.saltHex);
+      const oldWrappingKey = deriveKeyFromPassphrase(currentOrRecoveryPassphrase, oldSalt);
+      try {
+        masterKey = openBytes(
+          oldWrappingKey,
+          fromBase64(this.vault.wrappedMasterKeyB64),
+          utf8ToBytes(this.vault.vaultId),
+        );
+      } catch {
+        throw new Error('INVALID_PASSPHRASE');
+      }
+      recoveryPass = this.normalizeRecoveryKey(maybeRecoveryKey);
+    } else {
+      this.checkIdleTimeout();
+      if (!this.unlockedMasterKey) {
+        throw new Error('VAULT_LOCKED');
+      }
+      masterKey = new Uint8Array(this.unlockedMasterKey);
+      recoveryPass = currentOrRecoveryPassphrase;
+    }
+
     const kitSalt = randomBytes(16);
-    const recoveryWrapKey = deriveKeyFromPassphrase(this.normalizeRecoveryKey(recoveryKey), kitSalt);
+    const recoveryWrapKey = deriveKeyFromPassphrase(recoveryPass, kitSalt);
     const sealedMaster = sealBytes(recoveryWrapKey, masterKey, utf8ToBytes(this.vault.vaultId));
-    return JSON.stringify(
+    const json = JSON.stringify(
       {
         format: 'telegram-drive-recovery-v1',
         vaultId: this.vault.vaultId,
@@ -345,10 +427,12 @@ export class VaultRuntime {
       null,
       2,
     );
+    return maybeRecoveryKey !== undefined ? json : toBase64(utf8ToBytes(json));
   }
 
-  verifyVaultRecovery(recoveryJson: string, recoveryKey: string) {
-    const parsed = JSON.parse(recoveryJson) as {
+  verifyVaultRecovery(bundleOrJson: string, recoveryKeyOrPassphrase: string) {
+    const rawJson = this.decodeRecoveryInput(bundleOrJson);
+    const parsed = JSON.parse(rawJson) as {
       format?: string;
       vaultId?: string;
       fingerprint?: string;
@@ -364,35 +448,46 @@ export class VaultRuntime {
     ) {
       throw new Error('INVALID_RECOVERY_KIT');
     }
-    const recoveryWrapKey = deriveKeyFromPassphrase(
-      this.normalizeRecoveryKey(recoveryKey),
-      hexToBytes(parsed.saltHex),
-    );
-    let masterKey: Uint8Array;
-    try {
-      masterKey = openBytes(
-        recoveryWrapKey,
-        fromBase64(parsed.sealedMasterKeyB64),
-        utf8ToBytes(parsed.vaultId),
-      );
-    } catch {
+    const saltBytes = hexToBytes(parsed.saltHex);
+    let masterKey: Uint8Array | null = null;
+    for (const candidate of [recoveryKeyOrPassphrase, this.normalizeRecoveryKey(recoveryKeyOrPassphrase)]) {
+      try {
+        const wrapKey = deriveKeyFromPassphrase(candidate, saltBytes);
+        masterKey = openBytes(wrapKey, fromBase64(parsed.sealedMasterKeyB64), utf8ToBytes(parsed.vaultId));
+        break;
+      } catch {
+        // try next normalization
+      }
+    }
+    if (!masterKey) {
       throw new Error('INVALID_RECOVERY_KEY');
     }
     const fingerprint = bytesToHex(sha256(masterKey)).slice(0, 16).toUpperCase();
     masterKey.fill(0);
+    const matchesVault = Boolean(this.vault && this.vault.vaultId === parsed.vaultId);
     return {
+      matches_vault: matchesVault,
+      missing_profiles: 0,
+      complete: true,
       vaultId: parsed.vaultId,
       createdAt: parsed.createdAt ?? new Date().toISOString(),
       fingerprint,
-      matchesExistingVault: Boolean(this.vault && this.vault.vaultId === parsed.vaultId),
+      matchesExistingVault: matchesVault,
     };
   }
 
-  importVaultRecovery(recoveryJson: string, recoveryKey: string, newPassphrase: string): void {
-    if (!newPassphrase || newPassphrase.length < 6) {
+  importVaultRecovery(
+    bundleOrJson: string,
+    recoveryKeyOrPassphrase: string,
+    newPassphrase?: string | null,
+  ): void {
+    const effectiveNewPass =
+      newPassphrase && newPassphrase.length >= 6 ? newPassphrase : recoveryKeyOrPassphrase;
+    if (!effectiveNewPass || effectiveNewPass.length < 6) {
       throw new Error('VAULT_PASSPHRASE_TOO_SHORT');
     }
-    const parsed = JSON.parse(recoveryJson) as {
+    const rawJson = this.decodeRecoveryInput(bundleOrJson);
+    const parsed = JSON.parse(rawJson) as {
       format?: string;
       vaultId: string;
       createdAt?: string;
@@ -402,22 +497,22 @@ export class VaultRuntime {
     if (parsed.format !== 'telegram-drive-recovery-v1') {
       throw new Error('INVALID_RECOVERY_KIT');
     }
-    const recoveryWrapKey = deriveKeyFromPassphrase(
-      this.normalizeRecoveryKey(recoveryKey),
-      hexToBytes(parsed.saltHex),
-    );
-    let masterKey: Uint8Array;
-    try {
-      masterKey = openBytes(
-        recoveryWrapKey,
-        fromBase64(parsed.sealedMasterKeyB64),
-        utf8ToBytes(parsed.vaultId),
-      );
-    } catch {
+    const saltBytes = hexToBytes(parsed.saltHex);
+    let masterKey: Uint8Array | null = null;
+    for (const candidate of [recoveryKeyOrPassphrase, this.normalizeRecoveryKey(recoveryKeyOrPassphrase)]) {
+      try {
+        const wrapKey = deriveKeyFromPassphrase(candidate, saltBytes);
+        masterKey = openBytes(wrapKey, fromBase64(parsed.sealedMasterKeyB64), utf8ToBytes(parsed.vaultId));
+        break;
+      } catch {
+        // try next normalization
+      }
+    }
+    if (!masterKey) {
       throw new Error('INVALID_RECOVERY_KEY');
     }
     const newSalt = randomBytes(16);
-    const newWrappingKey = deriveKeyFromPassphrase(newPassphrase, newSalt);
+    const newWrappingKey = deriveKeyFromPassphrase(effectiveNewPass, newSalt);
     const wrapped = sealBytes(newWrappingKey, masterKey, utf8ToBytes(parsed.vaultId));
     const fingerprint = bytesToHex(sha256(masterKey)).slice(0, 16).toUpperCase();
     this.vault = {
@@ -479,8 +574,13 @@ export class VaultRuntime {
     }
     const isVault = rec.mode === 'vault';
     this.checkIdleTimeout();
+    const unlocked = isVault && Boolean(this.unlockedMasterKey);
     return {
-      state: isVault ? ('encrypted_v2_vault' as const) : ('encrypted_v2_passphrase' as const),
+      state: unlocked ? ('encrypted_unlocked' as const) : ('encrypted_locked' as const),
+      envelope_version: 1,
+      protection_mode: rec.mode,
+      metadata_protected: rec.protectMetadata,
+      ciphertext_size: rec.originalSize,
       requiresVaultUnlock: isVault && !this.unlockedMasterKey,
       requiresPassphrase: !isVault,
       protectMetadata: rec.protectMetadata,

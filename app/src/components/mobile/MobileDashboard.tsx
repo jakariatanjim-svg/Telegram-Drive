@@ -175,7 +175,8 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const {
     store, folders, activeFolderId, setActiveFolderId, isSyncing, isConnected,
     handleLogout, handleSyncFolders, handleCreateFolder, handleFolderDelete,
-    handleFolderRename, handleFolderToggleVisibility, handleExportFolderInvite
+    handleFolderRename, handleFolderToggleVisibility, handleExportFolderInvite,
+    accountId,
   } = useTelegramConnection(logoutHandler);
 
   const { data: androidTransferEnvironment } = useQuery({
@@ -225,7 +226,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   ]);
 
   const {
-    uploadQueue, setUploadQueue, handleManualUpload, clearFinished: clearUploads,
+    uploadQueue, enqueueUploadItems, handleManualUpload, clearFinished: clearUploads,
     cancelAll: cancelUploads, pauseAll: pauseUploads, resumeAll: resumeUploads,
     cancelItem: cancelUpload, retryItem: retryUpload,
   } = useFileUpload(activeFolderId, store, transferAllowed, transferWaitingReason);
@@ -463,7 +464,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
     setUploadingCacheFiles(prev => new Set(prev).add(entry.cached_path));
     try {
       const stagedPath = await invoke<string>('cmd_stage_android_upload', { path: entry.cached_path });
-      setUploadQueue(queue => [...queue, {
+      await enqueueUploadItems([{
         id: tid,
         path: stagedPath,
         folderId: activeFolderId,
@@ -484,7 +485,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
         return next;
       });
     }
-  }, [activeFolderId, refetchCachedFiles, setUploadQueue, settings.videoUploadMode]);
+  }, [activeFolderId, enqueueUploadItems, refetchCachedFiles, settings.videoUploadMode]);
 
   const handleClearCachedFiles = useCallback(async () => {
     try {
@@ -1606,9 +1607,10 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
         </LazyFeatureBoundary>
       )}
 
-      {shareFile && (
+      {shareFile && accountId && (
         <ShareDialog
           file={shareFile}
+          ownerId={accountId}
           onClose={() => setShareFile(null)}
           folders={folders}
           activeFolderId={activeFolderId}
