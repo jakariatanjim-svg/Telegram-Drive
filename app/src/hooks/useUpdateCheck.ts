@@ -1,7 +1,8 @@
 import { useState, useCallback } from 'react';
 import type { UpdateInstallPhase } from '../services/updateReliability';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { RELEASES_URL } from '../services/installationInfo';
+
+export const RELEASES_URL = 'https://github.com/jakariatanjim-svg/Telegram-Drive/releases/latest';
 
 interface UpdateState {
     checking: boolean;
@@ -11,7 +12,6 @@ interface UpdateState {
     error: string | null;
     version: string | null;
     phase: UpdateInstallPhase | null;
-    managedByPackageManager: boolean;
 }
 
 interface UpdateCheckResult {
@@ -32,7 +32,6 @@ export function useUpdateCheck() {
         error: null,
         version: null,
         phase: null,
-        managedByPackageManager: false,
     });
 
     const checkForUpdates = useCallback(async (): Promise<UpdateCheckResult> => {

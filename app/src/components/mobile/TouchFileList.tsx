@@ -29,10 +29,9 @@ interface TouchFileListProps {
   folders: TelegramFolder[];
   activeFolderId: number | null;
   scrollElementRef: RefObject<HTMLElement | null>;
-  disableVirtualization?: boolean;
 }
 
-export function TouchFileList({ files, isLoading, onDownload, onDelete, onPreview, onRename, selectedIds, onToggleSelection, onSelectAll, onClearSelection, onBulkDelete, onBulkDownload, onBulkMove, onBulkShare, onShare, onCopyTelegramLink, onKeepOffline, onRemoveOffline, folders, activeFolderId, scrollElementRef, disableVirtualization = false }: TouchFileListProps) {
+export function TouchFileList({ files, isLoading, onDownload, onDelete, onPreview, onRename, selectedIds, onToggleSelection, onSelectAll, onClearSelection, onBulkDelete, onBulkDownload, onBulkMove, onBulkShare, onShare, onCopyTelegramLink, onKeepOffline, onRemoveOffline, folders, activeFolderId, scrollElementRef }: TouchFileListProps) {
     useTranslation();
   const [selectionMode, setSelectionMode] = useState(false);
   const [showMovePicker, setShowMovePicker] = useState(false);
@@ -72,7 +71,6 @@ export function TouchFileList({ files, isLoading, onDownload, onDelete, onPrevie
   }, [files.length, isSelectionActive, scrollElementRef]);
 
   const rowVirtualizer = useVirtualizer({
-    enabled: !disableVirtualization,
     count: files.length,
     getScrollElement: () => scrollElementRef.current,
     estimateSize: () => 82,
@@ -406,13 +404,11 @@ export function TouchFileList({ files, isLoading, onDownload, onDelete, onPrevie
           {/* File list — no more swipeable list, just tap-friendly rows with ⋮ menu */}
           <div
             ref={listRef}
-            className={disableVirtualization ? 'space-y-2.5' : 'relative'}
-            style={disableVirtualization ? undefined : { height: `${rowVirtualizer.getTotalSize()}px` }}
+            className="relative"
+            style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
           >
-            {disableVirtualization
-              ? files.map((file, index) => renderFileRow(file, index))
-              : rowVirtualizer.getVirtualItems().map((virtualRow) =>
-                renderFileRow(files[virtualRow.index], virtualRow.index, virtualRow))}
+            {rowVirtualizer.getVirtualItems().map((virtualRow) =>
+              renderFileRow(files[virtualRow.index], virtualRow.index, virtualRow))}
           </div>
         </>
       )}

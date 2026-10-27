@@ -310,10 +310,6 @@ fn collect(
         downloaded.file_count = count;
         downloaded.measured = measured;
     }
-    #[cfg(target_os = "ios")]
-    {
-        downloaded.measured = false;
-    }
     Ok(vec![
         kept, previews, thumbnails, native, converted, downloaded, staging,
     ])
@@ -348,7 +344,7 @@ pub async fn cmd_storage_read(
             conversion_busy = true;
         }
     }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let (mut active, downloads) =
         if let Some(engine) = app.try_state::<Arc<crate::transfer_engine::TransferEngine>>() {
             (
@@ -367,7 +363,7 @@ pub async fn cmd_storage_read(
         } else {
             (HashSet::new(), Vec::new())
         };
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     let (mut active, downloads) = (HashSet::new(), Vec::new());
     active.extend(assets::active_paths());
     active.extend(crate::commands::preview::active_legacy_paths());

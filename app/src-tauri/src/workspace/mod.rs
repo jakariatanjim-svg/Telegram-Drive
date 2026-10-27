@@ -14,7 +14,7 @@ pub mod storage;
 pub mod store;
 use crate::{commands::TelegramState, models::FileMetadata};
 pub use account::{current_owner, resume, suspend, AccountGuard};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) use account::{open_session, register_session, AuthenticationSession};
 pub(crate) use account::{operation_account, with_operation_account};
 use grammers_client::types::Peer;

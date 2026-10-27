@@ -349,7 +349,7 @@ fn mutate_running(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 async fn command_output(program: &str, args: &[&str]) -> Result<String> {
     let mut command = tokio::process::Command::new(program);
     command
@@ -366,56 +366,6 @@ async fn command_output(program: &str, args: &[&str]) -> Result<String> {
         return Err("NETWORK_STATUS_UNKNOWN".into());
     }
     String::from_utf8(output.stdout).map_err(|_| "NETWORK_STATUS_UNKNOWN".into())
-}
-
-#[cfg(target_os = "macos")]
-fn parse_macos_network(route: &str, hardware: &str) -> NetworkStatus {
-    let interface = route
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("interface:").map(str::trim));
-    let Some(interface) = interface else {
-        return NetworkStatus::unknown();
-    };
-    let mut wireless = false;
-    for block in hardware.split("Hardware Port:").skip(1) {
-        let mut lines = block.lines();
-        let kind = lines.next().unwrap_or("").trim();
-        let device = lines.find_map(|line| line.trim().strip_prefix("Device:").map(str::trim));
-        if device == Some(interface) && ["Wi-Fi", "AirPort"].contains(&kind) {
-            wireless = true;
-        }
-    }
-    NetworkStatus {
-        known: true,
-        connected: true,
-        wifi: wireless,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_default_interface(routes: &str) -> Option<String> {
-    routes
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() < 8
-                || fields[1] != "00000000"
-                || u32::from_str_radix(fields[3], 16).ok()? & 1 == 0
-            {
-                return None;
-            }
-            let interface = fields[0];
-            if !interface
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
-            {
-                return None;
-            }
-            Some((fields[6].parse::<u32>().ok()?, interface.to_string()))
-        })
-        .min_by_key(|(metric, _)| *metric)
-        .map(|(_, interface)| interface)
 }
 
 #[cfg(target_os = "windows")]
@@ -463,39 +413,6 @@ async fn read_network_status() -> NetworkStatus {
                 wifi: value.wifi && !value.metered,
             })
             .unwrap_or_else(|_| NetworkStatus::unknown());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let (route, hardware) = tokio::join!(
-            command_output("/sbin/route", &["-n", "get", "default"]),
-            command_output("/usr/sbin/networksetup", &["-listallhardwareports"])
-        );
-        return match (route, hardware) {
-            (Ok(route), Ok(hardware)) => parse_macos_network(&route, &hardware),
-            _ => NetworkStatus::unknown(),
-        };
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let Ok(routes) = tokio::fs::read_to_string("/proc/net/route").await else {
-            return NetworkStatus::unknown();
-        };
-        return match linux_default_interface(&routes) {
-            Some(interface) => NetworkStatus {
-                known: true,
-                connected: true,
-                wifi: tokio::fs::try_exists(
-                    Path::new("/sys/class/net").join(interface).join("wireless"),
-                )
-                .await
-                .unwrap_or(false),
-            },
-            None => NetworkStatus {
-                known: true,
-                connected: false,
-                wifi: false,
-            },
-        };
     }
     #[cfg(target_os = "windows")]
     {

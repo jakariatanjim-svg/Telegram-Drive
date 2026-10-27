@@ -33,7 +33,6 @@ const BOOLEAN_KEYS: &[&str] = &[
     "floodWaitRespect",
     "autoDetectVpn",
     "performanceMode",
-    "linuxRenderingFix",
     "encryptionProtectMetadata",
     "encryptionLockOnSleep",
 ];

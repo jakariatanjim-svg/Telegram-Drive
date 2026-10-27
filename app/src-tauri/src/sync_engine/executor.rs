@@ -101,7 +101,7 @@ fn validate_portable_relative_path(relative_path: &str) -> Result<(), String> {
             });
         if invalid {
             return Err(format!(
-                "Telegram path cannot be represented portably on Windows, macOS, and Linux: {relative_path}"
+                "Telegram path cannot be represented on Windows: {relative_path}"
             ));
         }
     }
@@ -200,7 +200,7 @@ where
 }
 
 /// The name shown for a sync transfer: the file's own name, not its path.
-#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn display_name(relative_path: &str) -> String {
     relative_path
         .rsplit('/')
@@ -210,7 +210,7 @@ fn display_name(relative_path: &str) -> String {
         .to_string()
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn transfer_queue(app: &tauri::AppHandle) -> Option<Arc<crate::transfer_engine::TransferEngine>> {
     app.try_state::<Arc<crate::transfer_engine::TransferEngine>>()
         .map(|engine| engine.inner().clone())
@@ -236,7 +236,7 @@ async fn upload(
     // The transfer queue runs the upload: it shares the queue's limits and
     // retries, shows in Transfers, and continues a large file where an
     // earlier attempt stopped.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     if let Some(queue) = transfer_queue(app) {
         let total_bytes = tokio::fs::metadata(&path)
             .await
@@ -431,7 +431,7 @@ async fn verify_remote_precondition(
 }
 
 #[allow(clippy::too_many_arguments)] // One value per independent input of a download.
-#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_variables))]
+#[cfg_attr(target_os = "android", allow(unused_variables))]
 async fn download(
     app: &tauri::AppHandle,
     pair: &SyncPair,
@@ -457,12 +457,12 @@ async fn download(
         .state::<SyncEngine>()
         .track_transfer(transfer_id.clone(), Some(temporary.clone()));
     // The transfer queue runs the download, into our staging file.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let queue = transfer_queue(app);
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     let queue: Option<()> = None;
     let result = match queue {
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         Some(queue) => match app.state::<SyncEngine>().subscribe_shutdown() {
             Ok(stop) => queue
                 .run_supervised(

@@ -73,7 +73,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'files' | 'downloads' | 'settings'>('files');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const { isAndroid, isTelevision } = usePlatform();
+  const { isAndroid } = usePlatform();
   const { theme } = useTheme();
   const { settings, updateSetting, isLoaded: settingsLoaded } = useSettings();
   const [showHelp, setShowHelp] = useState(false);
@@ -787,7 +787,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   }, [activeFolderId, activeTab, bulkShareLinks, folderActionMenu, isAndroid, isSidebarOpen, pdfFile, playingFile, previewFile, renameFolder, selectedIds.length, setActiveFolderId, shareFile, showHelp]);
 
   return (
-    <div className={`absolute inset-0 flex flex-col bg-telegram-bg text-telegram-text overflow-hidden select-none font-sans ${isTelevision ? 'tv-shell' : ''}`}>
+    <div className="absolute inset-0 flex flex-col bg-telegram-bg text-telegram-text overflow-hidden select-none font-sans">
       {/* Premium Gradient Top Header */}
       <header className="flex items-center justify-between px-5 pb-4 pt-[calc(1rem+env(safe-area-inset-top,24px))] bg-gradient-to-r from-telegram-hover/40 to-telegram-bg border-b border-telegram-border/60 shadow-lg backdrop-blur-md sticky top-0 z-40 md:ml-[280px]">
         <div className="flex items-center gap-3">
@@ -875,7 +875,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
               folders={folders}
               activeFolderId={activeFolderId}
               scrollElementRef={scrollRootRef}
-              disableVirtualization={isTelevision}
             />
           </div>
         )}
@@ -1517,7 +1516,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
       )}
 
       {/* Floating Bottom Nav Bar */}
-      <BottomNavBar activeTab={activeTab} setActiveTab={setActiveTab} isAndroid={isAndroid} isTelevision={isTelevision} />
+      <BottomNavBar activeTab={activeTab} setActiveTab={setActiveTab} isAndroid={isAndroid} />
 
       {/* Previews Overlays (Media, PDF & Images) */}
       {playingFile && (

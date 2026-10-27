@@ -116,7 +116,7 @@ pub struct SyncConflict {
 }
 
 fn sync_paths_overlap(left: &Path, right: &Path) -> bool {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         let components = |path: &Path| {
             path.components()
@@ -127,7 +127,7 @@ fn sync_paths_overlap(left: &Path, right: &Path) -> bool {
         let right = components(right);
         left.starts_with(&right) || right.starts_with(&left)
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
         left.starts_with(right) || right.starts_with(left)
     }

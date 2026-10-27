@@ -718,9 +718,9 @@ impl TelegramAssetSource {
             app.state::<Arc<NetworkConfig>>().inner().clone(),
             executable,
         )?;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let mut source = source;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         if matches!(source.info.fallback, Some(ThumbnailInput::Heic(_))) {
             source.info.fallback = Some(ThumbnailInput::Heic(crate::heic::Tools::platform(
                 app.path().resource_dir().ok().as_deref(),
@@ -749,17 +749,17 @@ impl TelegramAssetSource {
             Media::Document(d) => d.mime_type(),
             _ => None,
         };
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let heic = crate::heic::is_mime(mime)
             || matches!(&media, Media::Document(d) if crate::heic::is_name(d.name()));
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         let heic = false;
         let fallback = if heic {
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             {
                 Some(ThumbnailInput::Heic(crate::heic::Tools::platform(None)))
             }
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "android")]
             {
                 None
             }
@@ -869,7 +869,7 @@ pub async fn cmd_workspace_asset(
         key.clone(),
         request_id.clone(),
     );
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let tools = crate::heic::Tools::platform(app.path().resource_dir().ok().as_deref());
     let original = asset_at(
         cache,
@@ -889,7 +889,7 @@ pub async fn cmd_workspace_asset(
         },
     )
     .await?;
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     if display == Some(true) && !thumbnail && crate::heic::is_name(&original) {
         return display_rendition_at(
             display_scope.0,
@@ -901,7 +901,7 @@ pub async fn cmd_workspace_asset(
         )
         .await;
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     let _ = (display, display_scope);
     Ok(original)
 }
@@ -1615,7 +1615,7 @@ pub(crate) struct VideoFixtureClock {
 }
 #[derive(Clone)]
 pub(crate) enum ThumbnailInput {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     Heic(crate::heic::Tools),
     Image,
     Video {
@@ -1642,7 +1642,7 @@ pub(crate) async fn render_thumbnail<H: Send + 'static>(
         .acquire_owned()
         .await
         .map_err(|_| "Thumbnail service stopped")?;
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let heic_permit = if matches!(kind, ThumbnailInput::Heic(_)) {
         Some(
             crate::heic::DECODERS
@@ -1657,7 +1657,7 @@ pub(crate) async fn render_thumbnail<H: Send + 'static>(
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _holds = holds;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let _heic_permit = heic_permit;
         #[cfg(feature = "native-e2e")]
         let _observation = DecodeObservation::new();
@@ -1680,7 +1680,7 @@ pub(crate) async fn render_thumbnail<H: Send + 'static>(
         let _partial = ActivePath::new(temporary.clone(), token.clone(), true);
         let image_input = match kind {
             ThumbnailInput::Image => input.clone(),
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             ThumbnailInput::Heic(tools) => {
                 crate::heic::decode(&input, &temporary, &tools, (480, 360), check)?;
                 temporary.clone()
@@ -1926,7 +1926,7 @@ pub(crate) async fn set_pinned_at(
             return Ok(false);
         };
         account.validate()?;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let store = Store::open(&account.root, account.owner)?;
         let _mutation = cache_state();
         if !std::fs::symlink_metadata(&path)
@@ -1935,9 +1935,9 @@ pub(crate) async fn set_pinned_at(
             return Ok(false);
         }
         let paired = vec![path.clone()];
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let mut paired = paired;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         if let Some(saved) = store.record::<HeicRendition>(
             "heic-rendition-v1",
             &heic_association_key(&key, &path.canonicalize().map_err(|e| e.to_string())?),
@@ -2045,14 +2045,14 @@ pub(crate) async fn delete_cached_at(
     .map_err(|e| e.to_string())?
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 #[derive(serde::Deserialize, serde::Serialize)]
 struct HeicRendition {
     source: PathBuf,
     fingerprint: String,
     rendition: PathBuf,
 }
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn heic_association_key(key: &str, source: &Path) -> String {
     format!(
         "{:x}",
@@ -2061,7 +2061,7 @@ fn heic_association_key(key: &str, source: &Path) -> String {
         )
     )
 }
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn heic_source_allowed(
     account: &AccountGuard,
     cache: &Path,
@@ -2106,7 +2106,7 @@ fn heic_source_allowed(
     }
     Err("HEIC_SOURCE_REFUSED".into())
 }
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) async fn display_rendition_at(
     cache: PathBuf,
     account: AccountGuard,
@@ -2293,7 +2293,7 @@ pub(crate) async fn display_rendition_at(
     .map_err(|e| e.to_string())?
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) fn track_decoder_partial(path: &Path, destination: &Path) -> Option<ActivePath> {
     let token = cache_state().paths.get(destination).cloned()?;
     Some(ActivePath::new(path.to_path_buf(), token, true))

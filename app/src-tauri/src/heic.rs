@@ -18,17 +18,12 @@ pub(crate) static DECODERS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 #[derive(Clone, Default)]
 pub(crate) struct Tools {
-    pub sips: Option<PathBuf>,
     pub ffmpeg: Vec<PathBuf>,
     #[cfg(feature = "native-e2e")]
     pub fixture: Option<process_budget::FixtureClock>,
 }
 impl Tools {
     pub(crate) fn platform(resource: Option<&Path>) -> Self {
-        #[cfg(target_os = "macos")]
-        let sips = Some(PathBuf::from("/usr/bin/sips"));
-        #[cfg(not(target_os = "macos"))]
-        let sips = None;
         let mut ffmpeg = Vec::new();
         if let Some(resource) = resource {
             let name = if cfg!(target_os = "windows") {
@@ -43,7 +38,6 @@ impl Tools {
         }
         ffmpeg.push(PathBuf::from("ffmpeg"));
         Self {
-            sips,
             ffmpeg,
             #[cfg(feature = "native-e2e")]
             fixture: None,
@@ -619,9 +613,6 @@ pub(crate) fn decode(
         deadline
     };
     let mut attempts = Vec::new();
-    if let Some(sips) = &tools.sips {
-        attempts.push(("sips", sips));
-    }
     attempts.extend(tools.ffmpeg.iter().map(|path| ("ffmpeg", path)));
     let mut last = "HEIC_DECODER_UNAVAILABLE".to_string();
     for (name, executable) in attempts {
@@ -665,80 +656,66 @@ pub(crate) fn decode(
             .open(&temporary)
             .map_err(|e| e.to_string())?;
         let mut command = Command::new(executable);
-        if name == "sips" {
-            command
-                .args([
-                    "-s",
-                    "format",
-                    "jpeg",
-                    "-Z",
-                    &expected.0.max(expected.1).to_string(),
-                ])
-                .arg(input)
-                .arg("--out")
-                .arg(&temporary);
-        } else {
-            // Automatic stream-group selection assembles the primary grid in8.1.
-            // Mapping0:v:0 would select an individual tile.
-            command
-                .args([
-                    "-nostdin",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-max_alloc",
-                    "268435456",
-                    "-threads",
-                    "1",
-                    "-max_pixels",
-                    "64000000",
-                    "-protocol_whitelist",
-                    "file,pipe",
-                    "-probesize",
-                    "1048576",
-                    "-analyzeduration",
-                    "1000000",
-                    "-f",
-                    "mov",
-                    "-enable_drefs",
-                    "0",
-                    "-use_absolute_path",
-                    "0",
-                    "-i",
-                ])
-                .arg(input)
-                .args([
-                    "-an",
-                    "-sn",
-                    "-dn",
-                    "-frames:v",
-                    "1",
-                    "-map_metadata",
-                    "-1",
-                    "-s",
-                ])
-                //8.1's automatic grid assembly is already a complex graph;
-                // output sizing appends its scaler without an incompatible-vf.
-                .arg(format!("{}x{}", expected.0, expected.1))
-                .args([
-                    "-threads",
-                    "1",
-                    "-filter_threads",
-                    "1",
-                    "-filter_complex_threads",
-                    "1",
-                    "-c:v",
-                    "mjpeg",
-                    "-f",
-                    "image2",
-                    "-update",
-                    "1",
-                    "-fs",
-                    &cap.to_string(),
-                ])
-                .arg(&temporary);
-        }
+        // Automatic stream-group selection assembles the primary grid in 8.1.
+        // Mapping 0:v:0 would select an individual tile.
+        command
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-max_alloc",
+                "268435456",
+                "-threads",
+                "1",
+                "-max_pixels",
+                "64000000",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-probesize",
+                "1048576",
+                "-analyzeduration",
+                "1000000",
+                "-f",
+                "mov",
+                "-enable_drefs",
+                "0",
+                "-use_absolute_path",
+                "0",
+                "-i",
+            ])
+            .arg(input)
+            .args([
+                "-an",
+                "-sn",
+                "-dn",
+                "-frames:v",
+                "1",
+                "-map_metadata",
+                "-1",
+                "-s",
+            ])
+            // 8.1's automatic grid assembly is already a complex graph;
+            // output sizing appends its scaler without an incompatible -vf.
+            .arg(format!("{}x{}", expected.0, expected.1))
+            .args([
+                "-threads",
+                "1",
+                "-filter_threads",
+                "1",
+                "-filter_complex_threads",
+                "1",
+                "-c:v",
+                "mjpeg",
+                "-f",
+                "image2",
+                "-update",
+                "1",
+                "-fs",
+                &cap.to_string(),
+            ])
+            .arg(&temporary);
         #[cfg(feature = "native-e2e")]
         let output = if let Some(clock) = &tools.fixture {
             process_budget::run_fixture(command, false, &check, Some((&temporary, cap)), clock)

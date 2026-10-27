@@ -7,8 +7,6 @@ use std::{
 use sysinfo::{Pid, System};
 
 pub(crate) const RESIDENT_LIMIT: u64 = 1024 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const ADDRESS_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const CAPTURE_LIMIT: u64 = 8192;
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct Metrics {
@@ -42,9 +40,6 @@ impl Running {
             }
             self.running = false;
             let peak = usage.ru_maxrss.max(0) as u64;
-            #[cfg(target_os = "macos")]
-            return Some(peak);
-            #[cfg(not(target_os = "macos"))]
             return Some(peak.saturating_mul(1024));
         }
         #[cfg(target_os = "windows")]
@@ -79,10 +74,10 @@ impl Running {
             {
                 return Err(std::io::Error::last_os_error().to_string());
             }
-            #[cfg(target_os = "linux")]
-            let exited = info.si_pid() != 0;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "android")]
             let exited = info.si_pid != 0;
+            #[cfg(not(target_os = "android"))]
+            let exited = info.si_pid() != 0;
             if !exited {
                 return Ok(None);
             }
@@ -94,9 +89,6 @@ impl Running {
             }
             self.running = false;
             let peak = usage.ru_maxrss.max(0) as u64;
-            #[cfg(target_os = "macos")]
-            let bytes = peak;
-            #[cfg(not(target_os = "macos"))]
             let bytes = peak.saturating_mul(1024);
             Ok(Some((
                 libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
@@ -300,16 +292,6 @@ fn run_inner(
             command.pre_exec(|| {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    let limit = libc::rlimit {
-                        rlim_cur: ADDRESS_LIMIT as libc::rlim_t,
-                        rlim_max: ADDRESS_LIMIT as libc::rlim_t,
-                    };
-                    if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
                 }
                 Ok(())
             });

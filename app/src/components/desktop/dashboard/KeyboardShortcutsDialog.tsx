@@ -5,12 +5,12 @@ import { Command, X } from 'lucide-react';
 import { useModalFocus } from '../../../hooks/useModalFocus';
 
 const shortcuts = [
-    { keys: '⌘/Ctrl F', labelKey: 'shortcut_labels.search' },
-    { keys: '⌘/Ctrl A', labelKey: 'shortcut_labels.select_all' },
+    { keys: 'Ctrl + F', labelKey: 'shortcut_labels.search' },
+    { keys: 'Ctrl + A', labelKey: 'shortcut_labels.select_all' },
     { keys: 'Enter', labelKey: 'shortcut_labels.open' },
     { keys: 'F2', labelKey: 'shortcut_labels.rename' },
-    { keys: '⌘/Ctrl D', labelKey: 'shortcut_labels.download' },
-    { keys: '⌘/Ctrl ⇧ S', labelKey: 'shortcut_labels.share' },
+    { keys: 'Ctrl + D', labelKey: 'shortcut_labels.download' },
+    { keys: 'Ctrl + Shift + S', labelKey: 'shortcut_labels.share' },
     { keys: 'Delete / Backspace', labelKey: 'shortcut_labels.delete' },
     { keys: 'Esc', labelKey: 'shortcut_labels.close' },
     { keys: '?', labelKey: 'shortcut_labels.show' },

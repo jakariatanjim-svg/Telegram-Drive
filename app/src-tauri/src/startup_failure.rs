@@ -32,18 +32,19 @@ pub fn describe(error: &str, log_file: Option<&Path>) -> String {
     message
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn open_folder(folder: &Path) {
-    #[cfg(target_os = "macos")]
-    let program = "open";
     #[cfg(target_os = "windows")]
-    let program = "explorer";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let program = "xdg-open";
-    let mut command = std::process::Command::new(program);
-    command.arg(folder);
-    crate::process_util::hide_console_blocking(&mut command);
-    let _ = command.spawn();
+    {
+        let mut command = std::process::Command::new("explorer");
+        command.arg(folder);
+        crate::process_util::hide_console_blocking(&mut command);
+        let _ = command.spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = folder;
+    }
 }
 
 /// Record the failure and show it. Returns after the user dismisses the
@@ -55,7 +56,7 @@ pub fn report(error: &str) {
     let message = describe(error, log_file.as_deref());
     eprintln!("{message}");
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     {
         let dialog = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)

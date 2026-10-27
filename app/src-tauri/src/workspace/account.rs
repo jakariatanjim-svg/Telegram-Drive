@@ -3,7 +3,7 @@ use grammers_session::{
     types::{PeerId, PeerInfo},
     Session,
 };
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock, Mutex, Weak},
@@ -31,7 +31,7 @@ static LIFECYCLE: WorkspaceLifecycle = WorkspaceLifecycle {
     generation: AtomicU64::new(0),
 };
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 struct RegisteredSession {
     session: Weak<SqliteSession>,
     identity: Option<(u64, u64)>,
@@ -39,13 +39,13 @@ struct RegisteredSession {
     ready: bool,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 static LIVE_SESSIONS: LazyLock<Mutex<HashMap<PathBuf, RegisteredSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Opening the library's storage can migrate its schema. Serialize that work
 /// against pre-registration readers too; no runner writes until registration.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) fn open_session(root: &Path) -> sqlite::Result<Arc<SqliteSession>> {
     let mut sessions = LIVE_SESSIONS
         .lock()
@@ -79,7 +79,7 @@ pub(crate) fn open_session(root: &Path) -> sqlite::Result<Arc<SqliteSession>> {
     Ok(session)
 }
 
-#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(unix, not(target_os = "android")))]
 fn session_file_identity(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path)?;
@@ -107,7 +107,7 @@ pub(crate) fn session_file_identity(path: &Path) -> std::io::Result<(u64, u64)> 
 
 /// Register before starting the runner so ownership reads share the session's
 /// mutex with Telegram's writes instead of opening a competing connection.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) fn register_session(root: &Path, session: &Arc<SqliteSession>) -> Result<(), String> {
     let mut sessions = LIVE_SESSIONS
         .lock()
@@ -140,14 +140,14 @@ pub(crate) fn register_session(root: &Path, session: &Arc<SqliteSession>) -> Res
 }
 
 /// A login reply may only activate the exact session that sent its request.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) struct AuthenticationSession {
     root: PathBuf,
     session: Arc<SqliteSession>,
     generation: u64,
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 impl AuthenticationSession {
     fn capture_in(
         sessions: &HashMap<PathBuf, RegisteredSession>,
@@ -259,18 +259,18 @@ pub(crate) async fn with_operation_account<T>(
 }
 
 pub fn suspend() {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let _sessions = LIVE_SESSIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     LIFECYCLE.suspend();
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     drop(_sessions);
     crate::local_search::invalidate();
 }
 
 pub fn resume() {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let _sessions = LIVE_SESSIONS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -287,7 +287,7 @@ pub fn current_owner(root: &Path) -> Result<i64, String> {
     if !path.is_file() {
         return Err("ACCOUNT_REQUIRED: Sign in to open your workspace".into());
     }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     {
         let generation = LIFECYCLE.generation.load(Ordering::SeqCst);
         // Keep fallback reads serialized with registration. Once a runner is
@@ -338,7 +338,7 @@ pub fn current_owner(root: &Path) -> Result<i64, String> {
         }
         owner.ok_or_else(|| "ACCOUNT_REQUIRED: Sign in to open your workspace".into())
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
         let session = SqliteSession::open(path)
             .map_err(|_| "ACCOUNT_UNAVAILABLE: The saved account is temporarily unavailable")?;
@@ -365,7 +365,7 @@ pub(crate) fn test_account_validation_counts() -> (u64, u64) {
     )
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn read_session_identity(path: &Path) -> Result<Option<i64>, String> {
     #[cfg(feature = "native-e2e")]
     FALLBACK_READS.fetch_add(1, Ordering::SeqCst);

@@ -1,4 +1,4 @@
-#![cfg(not(any(target_os = "android", target_os = "ios")))]
+#![cfg(not(target_os = "android"))]
 
 use actix_web::{web, Either, HttpResponse};
 use bytes::{Buf, Bytes};

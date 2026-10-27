@@ -460,7 +460,7 @@ pub async fn cmd_get_display_preview(
         Some(path) => path,
         None => compat_asset(app_handle.clone(), folder_id, message_id, false).await?,
     };
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     if crate::heic::is_name(&original) {
         let root = app_handle
             .path()

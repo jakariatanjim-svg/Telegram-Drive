@@ -294,17 +294,6 @@ fn reusable_filesystem(file: &File, path: &Path) -> bool {
         return false;
     }
     let _ = path;
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::fd::AsRawFd;
-        let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
-        // fstatfs inspects the same retained file, without following a new path.
-        if unsafe { libc::fstatfs(file.as_raw_fd(), info.as_mut_ptr()) } != 0 {
-            return false;
-        }
-        let info = unsafe { info.assume_init() };
-        info.f_fstypename[..5] == [97, 112, 102, 115, 0]
-    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::io::AsRawHandle;
@@ -331,7 +320,7 @@ fn reusable_filesystem(file: &File, path: &Path) -> bool {
         );
         name == "NTFS" || name == "ReFS"
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     {
         let _ = file;
         false

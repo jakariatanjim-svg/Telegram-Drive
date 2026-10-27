@@ -9,7 +9,6 @@ interface UpdateBannerProps {
     downloading: boolean;
     progress: number;
     phase: UpdateInstallPhase | null;
-    managedByPackageManager: boolean;
     onUpdate: () => void;
     onDismiss: () => void;
 }
@@ -20,7 +19,6 @@ export function UpdateBanner({
     downloading,
     progress,
     phase,
-    managedByPackageManager,
     onUpdate,
     onDismiss
 }: UpdateBannerProps) {
@@ -62,7 +60,7 @@ export function UpdateBanner({
                                 className="flex items-center gap-2 px-4 py-1.5 bg-white text-telegram-primary font-semibold rounded-full hover:bg-white/90 transition-colors shadow-md"
                             >
                                 <Download className="w-4 h-4" />
-                                {managedByPackageManager ? t('files.open') : t('settings.update_restart')}
+                                {t('settings.update_restart')}
                             </button>
                         )}
 

@@ -129,22 +129,11 @@ pub fn reserve_destination(
     Err("Could not reserve a unique download filename".into())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "linux",
-    target_os = "android"
-))]
+#[cfg(target_os = "android")]
 fn rename_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
     let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
-    // Both paths are NUL-terminated and remain live for the syscall. These
-    // flags perform the existence test and rename in one filesystem operation.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    let result =
-        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
@@ -194,13 +183,7 @@ fn rename_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
     move_file(source, destination, false)
 }
 
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "windows"
-)))]
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
 fn rename_without_replace(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::hard_link(source, destination)?;
     // Publication succeeded; a source cleanup error must not re-run the download.

@@ -35,7 +35,7 @@ Telegram Drive turns Telegram's file storage into a focused, desktop-style works
 - [Optional client-side encryption](#optional-client-side-encryption-beta-format-frozen)
 - [Privacy and security](#privacy-and-security)
 - [Languages](#languages)
-- [Android and Google TV](#android-and-google-tv)
+- [Android](#android)
 - [Local REST API and WebDAV](#local-rest-api-and-webdav)
 - [Support](#support)
 
@@ -43,7 +43,7 @@ Telegram Drive turns Telegram's file storage into a focused, desktop-style works
 
 | | |
 | --- | --- |
-| **Platforms** | Windows and Android (including Android TV / Google TV) |
+| **Platforms** | Windows (Portable Installer) and Android (Mobile APK) |
 | **Storage model** | Saved Messages is the home location; Telegram channels can be presented as folders |
 | **Transfers** | Files, folders, drag and drop, remote URLs, durable queues, background operation, and retry controls |
 | **Media** | Image preview, PDF viewing, audio playback, video streaming, thumbnails, and archive tools |
@@ -56,8 +56,8 @@ Telegram Drive turns Telegram's file storage into a focused, desktop-style works
 
 Download official installers and Android packages from the [GitHub Releases](https://github.com/jakariatanjim-svg/Telegram-Drive/releases/latest) page.
 
-- **Windows:** Download the installer from the latest release and select your preferred destination folder.
-- **Android / Android TV / Google TV:** Download the signed APK from the latest release, allow installing apps from your browser or file manager if prompted, and install over any previous build signed with the same key to preserve local data.
+- **Windows:** Download the portable installer from the latest release and select your preferred destination folder.
+- **Android:** Download the signed mobile APK from the latest release, allow installing apps from your browser or file manager if prompted, and install over any previous build signed with the same key to preserve local data.
 
 ## First-time setup
 
@@ -228,9 +228,9 @@ Telegram Drive supports a **System** language preference and these 24 selectable
 | Bengali (Bangladesh) | Indonesian | Filipino (Philippines) | Turkish |
 | Thai (Thailand) | Japanese | Korean | Vietnamese |
 
-## Android and Google TV
+## Android
 
-The Android package is distributed as a signed APK on GitHub Releases:
+The Android package is distributed as a signed mobile APK on GitHub Releases:
 
 1. Open the [latest release](https://github.com/jakariatanjim-svg/Telegram-Drive/releases/latest) and download the APK.
 2. On Android, allow **Install unknown apps** for the browser or file manager you used.
@@ -240,7 +240,6 @@ The Android package is distributed as a signed APK on GitHub Releases:
 Android requirements and notes:
 
 - Android 7.0 (API 24) or newer.
-- Supports phones, tablets, Android TV, and Google TV, including remote directional navigation.
 - Future updates signed with the same release key install cleanly over existing builds while preserving local data.
 
 ## Local REST API and WebDAV

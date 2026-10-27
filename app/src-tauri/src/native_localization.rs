@@ -150,7 +150,7 @@ pub fn format(language: &str, key: &str, arguments: &[(&str, &str)]) -> String {
     output
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 pub fn cmd_set_native_language(
     app: tauri::AppHandle,

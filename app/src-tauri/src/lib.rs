@@ -1,19 +1,17 @@
 pub mod app_log;
 pub mod crypto;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod desktop_lifecycle;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod desktop_notifications;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod desktop_power;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod desktop_preferences;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod desktop_tray;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub(crate) mod desktop_video_upload;
-pub mod installation;
-pub mod linux_startup;
 pub mod models;
 pub mod native_localization;
 #[cfg(not(target_os = "android"))]
@@ -63,10 +61,10 @@ fn init_com_on_worker_thread() {
 pub mod bandwidth;
 pub mod commands;
 mod external_files;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 mod heic;
 mod legacy_external;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 mod process_budget;
 pub mod process_util;
 pub mod proxy_secret;
@@ -75,7 +73,7 @@ pub mod socks5_bridge;
 pub mod startup_failure;
 pub mod temp_artifacts;
 mod traffic;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod transfer_engine;
 pub mod vpn_optimizer;
 
@@ -108,7 +106,7 @@ pub mod share_routes;
 pub mod sync_engine;
 pub mod transcode;
 pub mod upload_service;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub mod webdav;
 pub mod workspace;
 
@@ -293,7 +291,7 @@ pub async fn restart_api_server(_app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Restart (or stop) the loopback-only WebDAV server using persisted settings.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub async fn restart_webdav_server(app: &tauri::AppHandle) -> Result<(), String> {
     let lifecycle = app.state::<WebDavServerLifecycle>().0.clone();
     let generation = lifecycle.request_restart();
@@ -439,7 +437,7 @@ pub async fn restart_webdav_server(app: &tauri::AppHandle) -> Result<(), String>
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 pub async fn restart_webdav_server(_app: &tauri::AppHandle) -> Result<(), String> {
     log::info!("WebDAV hosting is disabled on mobile platforms.");
     Ok(())
@@ -853,46 +851,6 @@ fn cmd_get_system_diagnostics(app: tauri::AppHandle) -> Result<String, String> {
             std::env::consts::ARCH
         ));
 
-        #[cfg(target_os = "linux")]
-        {
-            let installation = installation::current_installation_info();
-            let package_type = if installation.managed_by_package_manager {
-                "pacman package"
-            } else if std::env::var_os("APPIMAGE").is_some() || std::env::var_os("APPDIR").is_some()
-            {
-                "AppImage"
-            } else {
-                "native/unknown"
-            };
-            lines.push(format!("Package Type: {package_type}"));
-            lines.push(format!(
-                "XDG_SESSION_TYPE: {}",
-                std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into())
-            ));
-            lines.push(format!(
-                "XDG_CURRENT_DESKTOP: {}",
-                std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".into())
-            ));
-            for name in [
-                "GDK_BACKEND",
-                "EGL_PLATFORM",
-                "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
-                "WEBKIT_DISABLE_DMABUF_RENDERER",
-                "WEBKIT_DISABLE_COMPOSITING_MODE",
-                "TELEGRAM_DRIVE_SAFE_RENDERING",
-            ] {
-                lines.push(format!(
-                    "{name}: {}",
-                    std::env::var(name).unwrap_or_else(|_| "unset".into())
-                ));
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            lines.push("Package Type: macOS bundle".to_string());
-        }
-
         #[cfg(target_os = "windows")]
         {
             lines.push("Package Type: Windows installer".to_string());
@@ -943,7 +901,7 @@ pub fn run() {
 
     // This must be the first desktop plugin so a secondary process cannot
     // initialize its own transfer engine before it is redirected here.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         if let Err(error) = desktop_lifecycle::show_main_window(
             app,
@@ -964,10 +922,10 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init());
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let builder = builder.plugin(tauri_plugin_notification::init());
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
 
     let app = builder
@@ -983,7 +941,7 @@ pub fn run() {
                 Err(error) => log::warn!("The log directory is unavailable: {error}"),
             }
 
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             {
                 let preferences = desktop_preferences::DesktopPreferencesState::load(app.handle())
                     .map_err(|error| {
@@ -1142,7 +1100,7 @@ pub fn run() {
                 }
             });
 
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             {
                 let power_monitor = desktop_power::DesktopPowerMonitor::new();
                 power_monitor.start(app.handle().clone());
@@ -1201,7 +1159,7 @@ pub fn run() {
                 e
             })?;
             app.manage(db_pool.clone());
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             {
                 let transfer_engine = transfer_engine::TransferEngine::initialize(app.handle().clone())
                     .map_err(|error| {
@@ -1422,51 +1380,51 @@ pub fn run() {
             commands::cmd_get_thumbnail,
             commands::cmd_get_stream_info,
             commands::cmd_cancel_transfer,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_activity,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_adopt_legacy,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_discard_legacy,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_enqueue_many,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_list,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_set_limits,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_pause,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_resume,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_cancel,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_retry,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_supply_prompt_token,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_pause_all,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_resume_all,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_cancel_all,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             transfer_engine::cmd_transfer_clear_terminal,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_preferences::cmd_get_desktop_preferences,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_preferences::cmd_update_desktop_preferences,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_preferences::cmd_set_desktop_lock_on_sleep,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_notifications::cmd_get_notification_permission,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             native_localization::cmd_set_native_language,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_notifications::cmd_request_notification_permission,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_lifecycle::cmd_desktop_frontend_ready,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             desktop_lifecycle::cmd_desktop_frontend_unready,
             commands::cmd_auth_qr_login,
             commands::cmd_auth_qr_poll,
@@ -1499,7 +1457,6 @@ pub fn run() {
             cmd_list_cached_files,
             cmd_remove_cached_path,
             cmd_get_system_diagnostics,
-            installation::cmd_get_installation_info,
             android_security::cmd_get_android_authentication_available,
             android_security::cmd_android_authenticate,
             android_security::cmd_configure_android_privacy,
@@ -1555,7 +1512,7 @@ pub fn run() {
 
     let graceful_sync_exit_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     app.run(move |app_handle, event| {
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         if let tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
@@ -1582,7 +1539,7 @@ pub fn run() {
             }
         }
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         if matches!(&event, tauri::RunEvent::Resumed) {
             if let Some(power_monitor) =
                 app_handle.try_state::<Arc<desktop_power::DesktopPowerMonitor>>()
@@ -1602,7 +1559,7 @@ pub fn run() {
                             log::error!("Folder sync did not shut down cleanly: {error}");
                         }
                     }
-                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    #[cfg(not(target_os = "android"))]
                     if let Some(transfer_engine) =
                         app_handle.try_state::<Arc<transfer_engine::TransferEngine>>()
                     {

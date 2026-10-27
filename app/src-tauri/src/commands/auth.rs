@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use grammers_client::Client;
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 use grammers_session::types::UpdateState;
 use grammers_session::types::{PeerAuth, PeerInfo, UpdatesState};
 use grammers_session::Session;
@@ -24,11 +24,11 @@ use grammers_client::types::PasswordToken;
 use grammers_mtsender::InvocationError;
 
 fn open_client_session(root: &std::path::Path) -> sqlite::Result<Arc<SqliteSession>> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     {
         crate::workspace::open_session(root)
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
         SqliteSession::open(root.join("telegram.session")).map(Arc::new)
     }
@@ -184,7 +184,7 @@ pub async fn ensure_client_initialized(
         }
     };
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     crate::workspace::register_session(&app_data_dir, &session)?;
 
     let net_config = app_handle.state::<Arc<crate::vpn_optimizer::NetworkConfig>>();
@@ -634,15 +634,15 @@ async fn current_client(state: &TelegramState) -> Result<Client, String> {
         .ok_or_else(|| "Telegram client is not initialized.".to_string())
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 type CapturedAuthentication = crate::workspace::AuthenticationSession;
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 struct CapturedAuthentication;
 
 async fn authentication_client(
     state: &TelegramState,
 ) -> Result<(Client, CapturedAuthentication), String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     {
         // Client initialization holds this lock while installing its session.
         // Capture the matching pair before sending any authentication request.
@@ -657,13 +657,13 @@ async fn authentication_client(
             .ok_or("Telegram session is not initialized.")?;
         Ok((client, CapturedAuthentication::capture(session)?))
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
         Ok((current_client(state).await?, CapturedAuthentication))
     }
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn authenticated_peer(user: &grammers_client::types::User) -> PeerInfo {
     let mut peer = PeerInfo::from(user);
     if let PeerInfo::User { is_self, .. } = &mut peer {
@@ -724,11 +724,11 @@ async fn complete_raw_login(
     authorization: tl::types::auth::Authorization,
     captured: &CapturedAuthentication,
 ) -> Result<(), String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     let _ = state;
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     let _ = captured;
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     let session = state
         .session
         .lock()
@@ -755,7 +755,7 @@ async fn complete_raw_login(
             is_self: Some(true),
         },
     };
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     session.cache_peer(&peer);
 
     let updates = if let Ok(Ok(tl::enums::updates::State::State(update))) = timeout(
@@ -774,9 +774,9 @@ async fn complete_raw_login(
     } else {
         None
     };
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     captured.complete_verified(&peer, updates)?;
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     if let Some(updates) = updates {
         session.set_update_state(UpdateState::All(updates));
     }
@@ -1120,9 +1120,9 @@ pub async fn cmd_auth_check_password(
         Ok(user) => {
             log::info!("2FA Success.");
             *state.phone_login.lock().await = None;
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             captured.complete_verified(&authenticated_peer(&user), None)?;
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "android")]
             let _ = (&captured, user);
             Ok(AuthResult {
                 success: true,
@@ -1193,14 +1193,14 @@ pub async fn cmd_auth_qr_login(
             Ok(url)
         }
         tl::enums::auth::LoginToken::Success(success) => {
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             match success.authorization {
                 tl::enums::auth::Authorization::Authorization(authorization) => {
                     complete_raw_login(&client, &state, authorization, &captured).await?;
                 }
                 _ => return Err("Telegram did not confirm an existing account".into()),
             }
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "android")]
             let _ = (&captured, success);
             // Already authorized (e.g. from a previous session)
             log::info!("QR login: already authorized");
@@ -1231,12 +1231,12 @@ pub async fn cmd_auth_qr_poll(state: State<'_, TelegramState>) -> Result<AuthRes
     match client.is_authorized().await {
         Ok(true) => {
             log::info!("QR login: session authorized!");
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             let user = client.get_me().await.map_err(map_auth_error)?;
             *state.phone_login.lock().await = None;
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            #[cfg(not(target_os = "android"))]
             captured.complete_verified(&authenticated_peer(&user), None)?;
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "android")]
             let _ = &captured;
             Ok(AuthResult {
                 success: true,

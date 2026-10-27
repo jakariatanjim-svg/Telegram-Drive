@@ -106,11 +106,11 @@ pub(crate) async fn folder_flags(
     let account = account.clone();
     tokio::task::spawn_blocking(move || {
         account.validate()?;
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        #[cfg(not(target_os = "android"))]
         let flags = read_folder_flags(&Store::open(&account.root, account.owner)?, folder_id)?;
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         let files = Store::open(&account.root, account.owner)?.folder_files(folder_id)?;
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        #[cfg(target_os = "android")]
         let flags = files
             .into_iter()
             .filter_map(|file| {
@@ -129,7 +129,7 @@ pub(crate) async fn folder_flags(
 /// Flags are optional local decoration for a remote listing. A damaged cached
 /// filename or flag must not prevent that listing from repairing its metadata.
 /// Preserve the original rows and recover every valid flag independently.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn read_folder_flags(
     store: &Store,
     folder_id: Option<i64>,

@@ -32,7 +32,6 @@ export const SYNCABLE_SETTING_KEYS = [
   'autoDetectVpn',
   'archiveMaxBytes',
   'performanceMode',
-  'linuxRenderingFix',
   'transcodeCacheMaxGb',
   'encryptionDefaultMode',
   'encryptionProtectMetadata',

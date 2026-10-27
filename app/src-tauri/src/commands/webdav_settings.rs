@@ -92,7 +92,7 @@ fn response(app: &AppHandle, settings: WebDavSettingsFile) -> WebDavSettingsResp
         .unwrap_or((false, None));
 
     WebDavSettingsResponse {
-        supported: cfg!(not(any(target_os = "android", target_os = "ios"))),
+        supported: cfg!(not(target_os = "android")),
         enabled: settings.enabled,
         port: settings.port,
         write_enabled: settings.write_enabled,
@@ -131,7 +131,7 @@ pub async fn cmd_update_webdav_settings(
     write_enabled: bool,
     app: AppHandle,
 ) -> Result<WebDavSettingsResponse, String> {
-    if cfg!(any(target_os = "android", target_os = "ios")) {
+    if cfg!(target_os = "android") {
         return Err("WebDAV hosting is available in the desktop app".to_string());
     }
     validate_port(&app, port, enabled)?;
@@ -160,7 +160,7 @@ pub async fn cmd_update_webdav_settings(
 
 #[tauri::command]
 pub async fn cmd_regenerate_webdav_token(app: AppHandle) -> Result<WebDavTokenResponse, String> {
-    if cfg!(any(target_os = "android", target_os = "ios")) {
+    if cfg!(target_os = "android") {
         return Err("WebDAV hosting is available in the desktop app".to_string());
     }
     let token: String = {

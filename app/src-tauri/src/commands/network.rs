@@ -17,7 +17,6 @@ pub struct AndroidTransferEnvironment {
     pub free_bytes: u64,
     pub power_save_mode: bool,
     pub background_restricted: bool,
-    pub is_television: bool,
 }
 
 #[tauri::command]
@@ -64,7 +63,6 @@ pub fn cmd_get_android_transfer_environment() -> Result<AndroidTransferEnvironme
         free_bytes: u64::MAX,
         power_save_mode: false,
         background_restricted: false,
-        is_television: false,
     })
 }
 
@@ -390,42 +388,6 @@ pub async fn cmd_check_latency(
 #[tauri::command]
 pub async fn cmd_detect_vpn() -> Result<bool, String> {
     tokio::task::spawn_blocking(|| {
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: check for utun/tun/wg/ppp/tap/ipsec interfaces via ifconfig
-            match std::process::Command::new("ifconfig").arg("-l").output() {
-                Ok(output) => {
-                    let ifaces = String::from_utf8_lossy(&output.stdout);
-                    let vpn_prefixes = ["utun", "tun", "wg", "ppp", "tap", "ipsec"];
-                    let found = ifaces
-                        .split_whitespace()
-                        .any(|iface| vpn_prefixes.iter().any(|prefix| iface.starts_with(prefix)));
-                    Ok(found)
-                }
-                Err(_) => Ok(false),
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: inspect /sys/class/net to find interface names without executing shell commands
-            if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
-                let vpn_prefixes = ["tun", "tap", "wg", "ppp", "utun", "ipsec"];
-                let mut found = false;
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        if vpn_prefixes.iter().any(|prefix| name.starts_with(prefix)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                Ok(found)
-            } else {
-                Ok(false)
-            }
-        }
-
         #[cfg(target_os = "windows")]
         {
             // Windows: run ipconfig and check output for common VPN adapter keywords
@@ -452,9 +414,8 @@ pub async fn cmd_detect_vpn() -> Result<bool, String> {
             }
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        #[cfg(not(target_os = "windows"))]
         {
-            // Fallback for other systems
             Ok(false)
         }
     })
