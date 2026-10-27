@@ -6,10 +6,9 @@ interface BottomNavBarProps {
   activeTab: 'files' | 'downloads' | 'settings';
   setActiveTab: (tab: 'files' | 'downloads' | 'settings') => void;
   isAndroid?: boolean;
-  isTelevision?: boolean;
 }
 
-export function BottomNavBar({ activeTab, setActiveTab, isAndroid, isTelevision }: BottomNavBarProps) {
+export function BottomNavBar({ activeTab, setActiveTab, isAndroid }: BottomNavBarProps) {
   const { t } = useTranslation();
 
   const tabs = [
@@ -19,7 +18,7 @@ export function BottomNavBar({ activeTab, setActiveTab, isAndroid, isTelevision 
   ] as const;
 
   return (
-    <nav aria-label={i18n.t("settings.color_primary")} className={`fixed left-4 right-4 bg-telegram-bg/85 backdrop-blur-xl border border-telegram-border/50 rounded-2xl shadow-2xl flex justify-around py-2 z-50 transition-all duration-300 md:left-[296px] ${isTelevision ? 'tv-primary-nav' : isAndroid ? 'bottom-[calc(5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-5'}`}>
+    <nav aria-label={i18n.t("settings.color_primary")} className={`fixed left-4 right-4 bg-telegram-bg/85 backdrop-blur-xl border border-telegram-border/50 rounded-2xl shadow-2xl flex justify-around py-2 z-50 transition-all duration-300 md:left-[296px] ${isAndroid ? 'bottom-[calc(5rem+env(safe-area-inset-bottom,0px))]' : 'bottom-5'}`}>
       {tabs.map(({ id, labelKey, icon: Icon }) => {
         const isActive = activeTab === id;
         return (

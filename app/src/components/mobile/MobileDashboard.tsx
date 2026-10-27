@@ -23,7 +23,10 @@ import { LazyFeatureBoundary } from '../shared/LazyFeatureBoundary';
 import { useTheme } from '../../context/ThemeContext';
 import { TelegramFile, TelegramFolder, ShareInfo, BandwidthStats } from '../../types';
 import { useSettings } from '../../context/SettingsContext';
-import { version as appVersion } from '../../../package.json';
+import { useUpdates } from '../../context/UpdateContext';
+import { version as rawAppVersion } from '../../../package.json';
+import { formatDisplayVersion } from '../../../shared/versioning';
+const appVersion = formatDisplayVersion(rawAppVersion, '1.0');
 import { LANGUAGES } from '../../i18n/languages';
 import { useTranslation } from 'react-i18next';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -73,9 +76,18 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'files' | 'downloads' | 'settings'>('files');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const { isAndroid, isTelevision } = usePlatform();
+  const { isAndroid } = usePlatform();
   const { theme } = useTheme();
   const { settings, updateSetting, isLoaded: settingsLoaded } = useSettings();
+  const {
+    checking: mobileUpdateChecking,
+    available: mobileUpdateAvailable,
+    version: mobileUpdateVersion,
+    downloading: mobileUpdateDownloading,
+    progress: mobileUpdateProgress,
+    checkForUpdates: checkMobileUpdates,
+    downloadAndInstall: installMobileUpdate,
+  } = useUpdates();
   const [showHelp, setShowHelp] = useState(false);
 
   // ── Android deep-link listener (https://t.me/ links) ──────────────────
@@ -787,7 +799,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   }, [activeFolderId, activeTab, bulkShareLinks, folderActionMenu, isAndroid, isSidebarOpen, pdfFile, playingFile, previewFile, renameFolder, selectedIds.length, setActiveFolderId, shareFile, showHelp]);
 
   return (
-    <div className={`absolute inset-0 flex flex-col bg-telegram-bg text-telegram-text overflow-hidden select-none font-sans ${isTelevision ? 'tv-shell' : ''}`}>
+    <div className="absolute inset-0 flex flex-col bg-telegram-bg text-telegram-text overflow-hidden select-none font-sans">
       {/* Premium Gradient Top Header */}
       <header className="flex items-center justify-between px-5 pb-4 pt-[calc(1rem+env(safe-area-inset-top,24px))] bg-gradient-to-r from-telegram-hover/40 to-telegram-bg border-b border-telegram-border/60 shadow-lg backdrop-blur-md sticky top-0 z-40 md:ml-[280px]">
         <div className="flex items-center gap-3">
@@ -875,7 +887,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
               folders={folders}
               activeFolderId={activeFolderId}
               scrollElementRef={scrollRootRef}
-              disableVirtualization={isTelevision}
             />
           </div>
         )}
@@ -1366,6 +1377,43 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                   <p className="text-[11px] text-telegram-subtext mt-0.5">v{appVersion}</p>
                 </div>
 
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    disabled={mobileUpdateChecking || mobileUpdateDownloading}
+                    onClick={async () => {
+                      const res = await checkMobileUpdates();
+                      if (res.error) {
+                        toast.error(t('settings.update_check_failed_toast', { error: res.error }));
+                      } else if (res.version) {
+                        toast.success(t('settings.update_available_toast', { version: res.version }));
+                      } else {
+                        toast.success(t('settings.latest_version_toast'));
+                      }
+                    }}
+                    className="rounded-xl border border-telegram-border/40 bg-telegram-bg/60 px-3.5 py-2 text-[11px] font-semibold text-telegram-text disabled:opacity-50"
+                  >
+                    {mobileUpdateChecking ? t('common.loading') : t('settings.check_now')}
+                  </button>
+                  {mobileUpdateAvailable && mobileUpdateVersion && (
+                    <button
+                      type="button"
+                      disabled={mobileUpdateDownloading}
+                      onClick={async () => {
+                        const res = await installMobileUpdate();
+                        if (res.error) {
+                          toast.error(t('settings.update_failed_toast', { error: res.error }));
+                        }
+                      }}
+                      className="rounded-xl bg-telegram-primary px-3.5 py-2 text-[11px] font-semibold text-black disabled:opacity-50"
+                    >
+                      {mobileUpdateDownloading
+                        ? `${mobileUpdateProgress}%`
+                        : `${t('common.update')} (v${mobileUpdateVersion})`}
+                    </button>
+                  )}
+                </div>
+
                 <div className="w-10 h-px bg-telegram-border" />
 
                 <div className="text-center space-y-2.5">
@@ -1517,7 +1565,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
       )}
 
       {/* Floating Bottom Nav Bar */}
-      <BottomNavBar activeTab={activeTab} setActiveTab={setActiveTab} isAndroid={isAndroid} isTelevision={isTelevision} />
+      <BottomNavBar activeTab={activeTab} setActiveTab={setActiveTab} isAndroid={isAndroid} />
 
       {/* Previews Overlays (Media, PDF & Images) */}
       {playingFile && (

@@ -1,7 +1,7 @@
 import i18n from '../../../i18n';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Monitor, Loader2, Languages, Play, Palette, Tag, Search, Database, FolderSync } from 'lucide-react';
+import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Loader2, Languages, Play, Palette, Tag, Search, Database, FolderSync } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useSettings } from '../../../context/SettingsContext';
@@ -9,7 +9,9 @@ import { useConfirm } from '../../../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
 import { LANGUAGES, type LanguagePreference } from '../../../i18n/languages';
 import { ShareInfo, CacheEntry, DetailedCacheInfo, OfflineCacheStatus, TranscodeCapabilities } from '../../../types';
-import { version as appVersion } from '../../../../package.json';
+import { version as rawAppVersion } from '../../../../package.json';
+import { formatDisplayVersion } from '../../../../shared/versioning';
+const appVersion = formatDisplayVersion(rawAppVersion, '1.0');
 import { clearImageMemoryCaches } from '../../../services/imagePreviewCache';
 import { useModalFocus } from '../../../hooks/useModalFocus';
 import { AccessTransparencyDialog, type LocalAccessService } from '../../shared/AccessTransparencyDialog';
@@ -103,7 +105,6 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
         version: updateVersion,
         downloading: updateDownloading,
         progress: updateProgress,
-        managedByPackageManager,
         checkForUpdates,
         downloadAndInstall,
     } = useUpdates();
@@ -783,8 +784,6 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                 <SettingsRow icon={<Tag className="h-4 w-4 text-telegram-subtext" />} title={t('common.hide_groups')} description={t('common.hide_groups_desc')} control={<SettingsToggle checked={settings.hideGroups} label={t('common.hide_groups')} onChange={() => updateSetting('hideGroups', !settings.hideGroups)} />} />
 
                                 <SettingsRow icon={<Zap className="h-4 w-4 text-telegram-subtext" />} title={t('settings.performance_mode')} description={t('settings.performance_mode_desc')} control={<SettingsToggle checked={settings.performanceMode} label={t('settings.performance_mode')} onChange={() => updateSetting('performanceMode', !settings.performanceMode)} />} />
-
-                                <SettingsRow icon={<Monitor className="h-4 w-4 text-telegram-subtext" />} title={t('settings.linux_rendering_fix')} description={t('settings.linux_rendering_desc')} control={<SettingsToggle checked={settings.linuxRenderingFix} label={t('settings.linux_rendering_fix')} onChange={() => { updateSetting('linuxRenderingFix', !settings.linuxRenderingFix); toast.info(t('settings.restart_app_toast'), { duration: 5000 }); }} />} />
                             </section>
 
                             {/* Language & Region Section */}
@@ -1223,7 +1222,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-telegram-primary text-white hover:bg-telegram-primary/90 transition"
                                             >
                                                 <Download className="w-3 h-3" />
-                                                {managedByPackageManager ? t('files.open') : t('settings.update_restart')}
+                                                {t('settings.update_restart')}
                                             </button>
                                         ) : updateDownloading ? (
                                             <div className="flex items-center gap-2">

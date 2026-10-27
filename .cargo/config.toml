@@ -1,3 +1,0 @@
-# Search indexes exist only in private in-memory connections; persistent schemas are unchanged.
-[env]
-SQLITE_ENABLE_FTS5 = { value = "1", force = true }

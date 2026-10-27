@@ -1,45 +1,49 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { localeCatalogPacking } from "./scripts/locale-catalog-packing";
 
-// @ts-expect-error process is a nodejs global
-const host = process.env.TAURI_DEV_HOST;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const platformDir = path.resolve(__dirname, "src/platform/tauri");
 
-// https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [
     localeCatalogPacking(),
     react(),
   ],
 
+  resolve: {
+    alias: {
+      "@tauri-apps/api/core": path.join(platformDir, "core.ts"),
+      "@tauri-apps/api/event": path.join(platformDir, "event.ts"),
+      "@tauri-apps/api/window": path.join(platformDir, "window.ts"),
+      "@tauri-apps/api/webview": path.join(platformDir, "webview.ts"),
+      "@tauri-apps/plugin-store": path.join(platformDir, "plugin-store.ts"),
+      "@tauri-apps/plugin-dialog": path.join(platformDir, "plugin-dialog.ts"),
+      "@tauri-apps/plugin-os": path.join(platformDir, "plugin-os.ts"),
+      "@tauri-apps/plugin-opener": path.join(platformDir, "plugin-opener.ts"),
+      "@tauri-apps/plugin-shell": path.join(platformDir, "plugin-shell.ts"),
+      "@tauri-apps/plugin-clipboard-manager": path.join(platformDir, "plugin-clipboard-manager.ts"),
+      "@tauri-apps/plugin-deep-link": path.join(platformDir, "plugin-deep-link.ts"),
+    },
+  },
+
   optimizeDeps: {
-    entries: ['index.html'],
+    entries: ["index.html"],
   },
 
   build: {
     manifest: true,
-    chunkSizeWarningLimit: 550,
+    chunkSizeWarningLimit: 900,
   },
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/android/**", "**/release/**", "**/dist-electron/**", "**/data/**", "**/data-dev/**"],
     },
   },
 }));

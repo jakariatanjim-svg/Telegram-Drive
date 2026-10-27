@@ -48,7 +48,6 @@ export const DEFAULT_SETTINGS: Settings = {
   autoDetectVpn: false,
   archiveMaxBytes: 256,
   performanceMode: false,
-  linuxRenderingFix: true,
   transcodeCacheMaxGb: 5,
   encryptionDefaultMode: 'standard',
   encryptionProtectMetadata: true,

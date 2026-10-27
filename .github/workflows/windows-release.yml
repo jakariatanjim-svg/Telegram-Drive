@@ -1,0 +1,118 @@
+name: Windows — Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version override (e.g. 1.0, 1.4, 2.0). Leave empty for automatic increment."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout repository with tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute target release version
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --tags --force
+          $override = "$env:INPUT_VERSION".Trim()
+
+          if ($override.Length -gt 0) {
+            $clean = $override -replace '^[vV]', ''
+            if ($clean -notmatch '^\d+\.[0-9]$') {
+              throw "Invalid version '$override'. Must match X.Y where minor is 0–9 (e.g. 1.0, 1.4, 2.0)."
+            }
+            $nextVersion = $clean
+          } else {
+            $tags = git tag --list "v*" | Where-Object { $_ -match '^v(\d+)\.([0-9])$' }
+            if (-not $tags -or $tags.Count -eq 0) {
+              $nextVersion = "1.0"
+            } else {
+              $parsed = foreach ($t in $tags) {
+                if ($t -match '^v(\d+)\.([0-9])$') {
+                  [PSCustomObject]@{
+                    Major = [int]$Matches[1]
+                    Minor = [int]$Matches[2]
+                  }
+                }
+              }
+              $latest = $parsed | Sort-Object -Property Major, Minor | Select-Object -Last 1
+              if ($latest.Minor -ge 9) {
+                $nextVersion = "$($latest.Major + 1).0"
+              } else {
+                $nextVersion = "$($latest.Major).$($latest.Minor + 1)"
+              }
+            }
+          }
+
+          $tag = "v$nextVersion"
+          $existingTag = git tag --list $tag
+          if ($existingTag) {
+            throw "Release tag '$tag' already exists."
+          }
+
+          "version=$nextVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Target Release: Telegram-Drive — $tag"
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Ephemerally inject release version (never committed)
+        working-directory: app
+        shell: pwsh
+        env:
+          TARGET_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_VERSION+'.0';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+
+      - name: Validate locales
+        working-directory: app
+        run: npm run i18n:validate
+
+      - name: Build Windows portable installer
+        working-directory: app
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        run: npm run dist:win
+
+      - name: Publish clean GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REL_VERSION: ${{ steps.ver.outputs.version }}
+          REL_TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          $assetPath = "app/release/Telegram-Drive-$($env:REL_VERSION)-portable-setup.exe"
+          if (-not (Test-Path -LiteralPath $assetPath)) {
+            throw "Built installer not found at $assetPath"
+          }
+          $title = "Telegram-Drive — $($env:REL_TAG)"
+          gh release create $env:REL_TAG $assetPath `
+            --title $title `
+            --generate-notes `
+            --target "${{ github.sha }}"

@@ -1,33 +1,22 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
 node_modules
 dist
 dist-ssr
+dist-electron
+release
+data
+data-dev
 *.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+logs
+*.log
 .npm-cache
 
-# Android local builds
-/src-tauri/gen/
-/src-tauri/gen/android/
+# Android Gradle build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/
+android/local.properties
 *.apk
 *.aab
-.gradle/
-local.properties
+*.keystore
+*.jks

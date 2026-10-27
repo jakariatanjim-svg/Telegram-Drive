@@ -136,7 +136,7 @@ export function EncryptionProvider({ children }: { children: ReactNode }) {
         let mobile = false;
         try {
             const platform = osType();
-            mobile = platform === 'android' || platform === 'ios';
+            mobile = platform === 'android';
         } catch {
             // Browser previews have no native sleep lifecycle.
             return;

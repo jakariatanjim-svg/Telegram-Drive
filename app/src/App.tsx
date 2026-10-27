@@ -5,7 +5,6 @@ import { AppProviders } from "./components/shared/AppProviders";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { UpdateBanner } from "./components/shared/UpdateBanner";
 import { useUpdates } from "./context/UpdateContext";
-import { usePlatform } from "./hooks/usePlatform";
 import "./App.css";
 
 const DesktopDashboard = React.lazy(() => import("./components/desktop/DesktopDashboard").then(m => ({ default: m.Dashboard })));
@@ -22,7 +21,6 @@ import { getLanguageInfo } from "./i18n/languages";
 import { resolveLanguagePreference } from "./i18n/resolveLanguage";
 import { version as appVersion } from "../package.json";
 import { consumeWhatsNew, type WhatsNewDetails } from "./services/updateReliability";
-import { useTvSpatialNavigation } from "./hooks/useTvSpatialNavigation";
 import { ensureLanguageResource } from "./i18n";
 import { publishNativeLanguage } from "./services/nativeLanguage";
 
@@ -43,9 +41,7 @@ function AppContent() {
   });
   const [whatsNew, setWhatsNew] = useState<WhatsNewDetails | null>(() => consumeWhatsNew(appVersion));
   const { theme } = useTheme();
-  const { available, version, downloading, progress, phase, managedByPackageManager, downloadAndInstall, dismissUpdate } = useUpdates();
-  const { isTelevision } = usePlatform();
-  useTvSpatialNavigation(isTelevision);
+  const { available, version, downloading, progress, phase, downloadAndInstall, dismissUpdate } = useUpdates();
   const { settings, updateSetting, isLoaded, persistenceStatus, retryPersistence } = useSettings();
   const { i18n, t } = useTranslation();
 
@@ -100,11 +96,6 @@ function AppContent() {
       document.body.classList.remove('performance-mode');
     }
   }, [settings.performanceMode, isLoaded]);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('tv-mode', isTelevision);
-    return () => document.documentElement.classList.remove('tv-mode');
-  }, [isTelevision]);
 
   // On mount: check for a saved session and auto-restore it.
   // This is the SINGLE source of truth for the initial connection.
@@ -198,7 +189,6 @@ function AppContent() {
         downloading={downloading}
         progress={progress}
         phase={phase}
-        managedByPackageManager={managedByPackageManager}
         onUpdate={downloadAndInstall}
         onDismiss={dismissUpdate}
       />

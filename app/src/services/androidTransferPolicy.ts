@@ -10,7 +10,6 @@ export interface AndroidTransferEnvironment {
   freeBytes: number;
   powerSaveMode: boolean;
   backgroundRestricted: boolean;
-  isTelevision: boolean;
 }
 
 export interface AndroidTransferGate {

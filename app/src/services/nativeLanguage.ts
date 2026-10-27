@@ -7,7 +7,7 @@ import type {SupportedLanguage} from '../i18n/languages';
 export async function publishNativeLanguage(language: SupportedLanguage): Promise<void> {
   let operatingSystem: ReturnType<typeof type>;
   try { operatingSystem = type(); } catch { return; }
-  if (operatingSystem === 'android' || operatingSystem === 'ios') return;
+  if (operatingSystem === 'android') return;
   try { await invoke('cmd_set_native_language', {language}); }
   catch { if (import.meta.env.DEV) console.error('[i18n] Native language synchronization unavailable.'); }
 }

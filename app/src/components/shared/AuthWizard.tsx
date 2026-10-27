@@ -70,7 +70,7 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const [error, setError] = useState<string | null>(null);
     const [floodWait, setFloodWait] = useState<number | null>(null);
     const [showHelp, setShowHelp] = useState(false);
-    const isMobile = typeof navigator !== 'undefined' && /android|iphone|ipad|ipod/i.test(navigator.userAgent.toLowerCase());
+    const isMobile = typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent);
     const [loginMethod, setLoginMethod] = useState<'phone' | 'qr'>(() => isMobile ? 'phone' : 'qr');
     const [codeDelivery, setCodeDelivery] = useState<CodeRequestResult | null>(null);
     const [resendWait, setResendWait] = useState(0);
