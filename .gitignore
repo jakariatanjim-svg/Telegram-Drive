@@ -1,41 +1,51 @@
-# Node
+# Node & Web builds
 node_modules/
 dist/
+dist-electron/
+release/
+/app/dist/
+/app/dist-electron/
+/app/release/
 /app/coverage/
+/app/data/
+/app/data-dev/
 .DS_Store
 .env
-
-# Rust
-/app/src-tauri/target/
-/app/src-tauri/coverage/
-/app/src-tauri/gen/
-**/*.rs.bk
+*.local
 
 # Editors
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 .idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
-# Misc
+# Logs & Diagnostics
 CompiledApps/
+logs/
 *.log
-*.key
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 Error.html
 **/LatestError.html
 
-# Android local builds
-/android/
-/app/src-tauri/gen/android/
-*.apk
-*.aab
+# Android Gradle build outputs & secrets
+/app/android/.gradle/
+/app/android/build/
+/app/android/app/build/
+/app/android/capacitor-cordova-android-plugins/
+/app/android/local.properties
 .gradle/
 local.properties
+*.apk
+*.aab
 *.keystore
 *.jks
 *.idsig
+*.key
 *.DMP
-
-# Android legacy/generated app files to exclude from git
-/app/src-tauri/src-android/
-/app/src-tauri/gen/schemas/android-schema.json
-/app/src-tauri/icons/android/
-.freebuff/

@@ -1,0 +1,113 @@
+name: Android — Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve latest GitHub Release tag
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          if [ -z "$TAG" ]; then
+            echo "No existing GitHub Release found. Run 'Windows — Release' first to create a vX.Y release." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]$'; then
+            echo "Latest release tag '$TAG' does not match expected vX.Y format." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Attaching Android APK to existing release: $TAG"
+
+      - name: Validate permanent signing secrets
+        id: keystore
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KS_B64" ] || [ -z "$KS_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
+            echo "Missing Android signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD)." >&2
+            exit 1
+          fi
+          KS_FILE="${RUNNER_TEMP}/telegram-drive-release.jks"
+          echo "$KS_B64" | base64 --decode > "$KS_FILE"
+          echo "ks_path=$KS_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      - name: Install web dependencies
+        working-directory: app
+        run: npm ci --ignore-scripts
+
+      - name: Ephemerally inject release version (never committed)
+        working-directory: app
+        env:
+          TARGET_VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_VERSION+'.0';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+
+      - name: Validate locales & sync Capacitor Android
+        working-directory: app
+        run: |
+          npm run i18n:validate
+          npm run cap:sync
+
+      - name: Build signed release Android APK
+        working-directory: app/android
+        env:
+          RELEASE_VERSION: ${{ steps.rel.outputs.version }}
+          ANDROID_KEYSTORE_PATH: ${{ steps.keystore.outputs.ks_path }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Attach signed APK to latest GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REL_TAG: ${{ steps.rel.outputs.tag }}
+          REL_VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          APK_OUT="app/android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_OUT" ]; then
+            echo "Expected signed release APK at $APK_OUT was not produced." >&2
+            exit 1
+          fi
+          CLEAN_APK="${RUNNER_TEMP}/Telegram-Drive-${REL_VERSION}.apk"
+          cp "$APK_OUT" "$CLEAN_APK"
+          gh release upload "$REL_TAG" "$CLEAN_APK" --clobber
+
+      - name: Clean temporary keystore and staged APK
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/telegram-drive-release.jks" "${RUNNER_TEMP}"/Telegram-Drive-*.apk

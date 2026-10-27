@@ -1,0 +1,86 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+def rawReleaseVersion = (System.getenv("RELEASE_VERSION") ?: "1.0").replaceFirst("^v", "").trim()
+def versionSegments = rawReleaseVersion.tokenize('.')
+def parsedMajor = (versionSegments.size() > 0 && versionSegments[0].isInteger()) ? versionSegments[0].toInteger() : 1
+def parsedMinor = (versionSegments.size() > 1 && versionSegments[1].isInteger()) ? versionSegments[1].toInteger() : 0
+def computedVersionCode = Math.max(1, (parsedMajor * 10) + parsedMinor)
+def computedVersionName = "${parsedMajor}.${parsedMinor}"
+
+def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+def keyAliasEnv = System.getenv("ANDROID_KEY_ALIAS")
+def keyPasswordEnv = System.getenv("ANDROID_KEY_PASSWORD")
+def hasReleaseKeystore = keystorePath && file(keystorePath).exists() && keystorePassword && keyAliasEnv && keyPasswordEnv
+
+android {
+    namespace = "com.telegramdrive.app"
+    compileSdk = rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        applicationId "com.telegramdrive.app"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode computedVersionCode
+        versionName computedVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = '21'
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(keystorePath)
+                storePassword keystorePassword
+                keyAlias keyAliasEnv
+                keyPassword keyPasswordEnv
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir {
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation "androidx.biometric:biometric:1.1.0"
+    implementation project(':capacitor-android')
+    implementation project(':capacitor-cordova-android-plugins')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+}
+
+apply from: 'capacitor.build.gradle'

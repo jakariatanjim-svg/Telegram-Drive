@@ -23,7 +23,10 @@ import { LazyFeatureBoundary } from '../shared/LazyFeatureBoundary';
 import { useTheme } from '../../context/ThemeContext';
 import { TelegramFile, TelegramFolder, ShareInfo, BandwidthStats } from '../../types';
 import { useSettings } from '../../context/SettingsContext';
-import { version as appVersion } from '../../../package.json';
+import { useUpdates } from '../../context/UpdateContext';
+import { version as rawAppVersion } from '../../../package.json';
+import { formatDisplayVersion } from '../../../shared/versioning';
+const appVersion = formatDisplayVersion(rawAppVersion, '1.0');
 import { LANGUAGES } from '../../i18n/languages';
 import { useTranslation } from 'react-i18next';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -76,6 +79,15 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const { isAndroid } = usePlatform();
   const { theme } = useTheme();
   const { settings, updateSetting, isLoaded: settingsLoaded } = useSettings();
+  const {
+    checking: mobileUpdateChecking,
+    available: mobileUpdateAvailable,
+    version: mobileUpdateVersion,
+    downloading: mobileUpdateDownloading,
+    progress: mobileUpdateProgress,
+    checkForUpdates: checkMobileUpdates,
+    downloadAndInstall: installMobileUpdate,
+  } = useUpdates();
   const [showHelp, setShowHelp] = useState(false);
 
   // ── Android deep-link listener (https://t.me/ links) ──────────────────
@@ -1363,6 +1375,43 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                 <div className="text-center">
                   <p className="text-sm font-bold text-telegram-text">{i18n.t("common.app_title")}</p>
                   <p className="text-[11px] text-telegram-subtext mt-0.5">v{appVersion}</p>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    disabled={mobileUpdateChecking || mobileUpdateDownloading}
+                    onClick={async () => {
+                      const res = await checkMobileUpdates();
+                      if (res.error) {
+                        toast.error(t('settings.update_check_failed_toast', { error: res.error }));
+                      } else if (res.version) {
+                        toast.success(t('settings.update_available_toast', { version: res.version }));
+                      } else {
+                        toast.success(t('settings.latest_version_toast'));
+                      }
+                    }}
+                    className="rounded-xl border border-telegram-border/40 bg-telegram-bg/60 px-3.5 py-2 text-[11px] font-semibold text-telegram-text disabled:opacity-50"
+                  >
+                    {mobileUpdateChecking ? t('common.loading') : t('settings.check_now')}
+                  </button>
+                  {mobileUpdateAvailable && mobileUpdateVersion && (
+                    <button
+                      type="button"
+                      disabled={mobileUpdateDownloading}
+                      onClick={async () => {
+                        const res = await installMobileUpdate();
+                        if (res.error) {
+                          toast.error(t('settings.update_failed_toast', { error: res.error }));
+                        }
+                      }}
+                      className="rounded-xl bg-telegram-primary px-3.5 py-2 text-[11px] font-semibold text-black disabled:opacity-50"
+                    >
+                      {mobileUpdateDownloading
+                        ? `${mobileUpdateProgress}%`
+                        : `${t('common.update')} (v${mobileUpdateVersion})`}
+                    </button>
+                  )}
                 </div>
 
                 <div className="w-10 h-px bg-telegram-border" />

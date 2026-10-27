@@ -1,32 +1,37 @@
 {
-  "name": "app",
+  "name": "telegram-drive",
+  "productName": "Telegram Drive",
   "private": true,
-  "version": "4.1.2",
+  "version": "1.0.0",
+  "description": "Private, encrypted personal cloud storage powered directly by your Telegram account.",
+  "main": "dist-electron/main.cjs",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build:web": "tsc && vite build",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build": "npm run build:web && npm run build:electron",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "cap:sync": "npm run build:web && cap sync android",
     "preview": "vite preview",
-    "tauri": "node scripts/tauri-cli.cjs",
     "i18n:validate": "node scripts/i18n/validate-locales.cjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
+    "@fuman/node": "^0.0.23",
+    "@mtcute/core": "^0.32.7",
+    "@mtcute/web": "^0.32.7",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
     "@tanstack/react-query": "^5.90.17",
     "@tanstack/react-virtual": "^3.13.18",
-    "@tauri-apps/api": "^2.11.0",
-    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
-    "@tauri-apps/plugin-deep-link": "^2.4.9",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-opener": "^2.5.4",
-    "@tauri-apps/plugin-os": "^2.3.2",
-    "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
-    "@tauri-apps/plugin-store": "^2.4.2",
+    "fflate": "^0.8.3",
     "framer-motion": "^12.26.2",
     "hls.js": "^1.6.16",
     "i18next": "^26.3.1",
@@ -40,15 +45,60 @@
     "sonner": "^2.0.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@tailwindcss/postcss": "^4.1.18",
-    "@tauri-apps/cli": "2.10.1",
+    "@types/node": "^22.15.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.4.23",
+    "electron": "^36.9.5",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.25.5",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
+  },
+  "build": {
+    "appId": "com.telegramdrive.desktop",
+    "productName": "Telegram Drive",
+    "asar": true,
+    "asarUnpack": [
+      "dist-electron/*.wasm"
+    ],
+    "directories": {
+      "buildResources": "packaging",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "packaging/icon.png",
+      "packaging/icon.ico",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "packaging/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Telegram Drive",
+      "include": "packaging/installer.nsh",
+      "artifactName": "Telegram-Drive-${env.RELEASE_VERSION}-portable-setup.${ext}"
+    }
   }
 }

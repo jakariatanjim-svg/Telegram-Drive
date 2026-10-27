@@ -5,6 +5,20 @@
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@tauri-apps/api/core": ["src/platform/tauri/core.ts"],
+      "@tauri-apps/api/event": ["src/platform/tauri/event.ts"],
+      "@tauri-apps/api/window": ["src/platform/tauri/window.ts"],
+      "@tauri-apps/api/webview": ["src/platform/tauri/webview.ts"],
+      "@tauri-apps/plugin-store": ["src/platform/tauri/plugin-store.ts"],
+      "@tauri-apps/plugin-dialog": ["src/platform/tauri/plugin-dialog.ts"],
+      "@tauri-apps/plugin-os": ["src/platform/tauri/plugin-os.ts"],
+      "@tauri-apps/plugin-opener": ["src/platform/tauri/plugin-opener.ts"],
+      "@tauri-apps/plugin-shell": ["src/platform/tauri/plugin-shell.ts"],
+      "@tauri-apps/plugin-clipboard-manager": ["src/platform/tauri/plugin-clipboard-manager.ts"],
+      "@tauri-apps/plugin-deep-link": ["src/platform/tauri/plugin-deep-link.ts"]
+    },
 
     /* Bundler mode */
     "moduleResolution": "bundler",
