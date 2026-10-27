@@ -26,6 +26,7 @@ import { userFacingError } from '../../../services/userFacingError';
 import { useActionScope } from '../../../hooks/useActionScope';
 import { useUpdates } from '../../../context/UpdateContext';
 import { BandwidthSettings } from './settings/BandwidthSettings';
+import { PortableMigrationSection } from './settings/PortableMigrationSection';
 import { applyProxySettings, applyVpnSettings } from '../../../services/networkSettings';
 
 interface SettingsModalProps {
@@ -704,8 +705,8 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                 <input value={settingsSearch} onChange={(event) => setSettingsSearch(event.target.value)} placeholder={i18n.t('ui_copy.search_settings')} className="quiet-control h-9 w-full border border-app-border bg-app-surface-sunken ps-8 pe-2 text-sm text-app-text outline-none focus:border-app-accent" />
                             </div>
                             {([
-                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates'], ['themes', Palette, 'Appearance colors themes']] as const],
-                                [t('ui_copy.nav_security'), [['privacy', Database, 'Privacy local data settings sync'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
+                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates storage portable migrate move relocate folder'], ['themes', Palette, 'Appearance colors themes']] as const],
+                                [t('ui_copy.nav_security'), [['privacy', Database, 'Privacy local data settings sync portable migrate move backup restore'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
                                 [t('ui_copy.nav_connections'), [['sync', FolderSync, 'Folder sync local directories Telegram channels'], ['sharing', Link, 'Sharing links local server']] as const],
                                 [t('settings.tab_advanced'), [['advanced', Gauge, 'REST API proxy VPN WebDAV network integration Finder token port']] as const],
                                 [t('ui_copy.nav_support'), [['about', Info, 'About diagnostics version updates']] as const],
@@ -750,14 +751,14 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                     icon={<Upload className="h-4 w-4 text-telegram-subtext" />}
                                     title={t('settings.concurrent_uploads')}
                                     description={t('settings.max_uploads_desc')}
-                                    control={<SettingsStepper value={settings.maxConcurrentUploads} minimum={1} maximum={10} label={t('settings.concurrent_uploads')} onChange={value => updateSetting('maxConcurrentUploads', value)} />}
+                                    control={<SettingsStepper value={settings.maxConcurrentUploads} minimum={1} maximum={16} label={t('settings.concurrent_uploads')} onChange={value => updateSetting('maxConcurrentUploads', value)} />}
                                 />
 
                                 <SettingsRow
                                     icon={<Download className="h-4 w-4 text-telegram-subtext" />}
                                     title={t('settings.concurrent_downloads')}
                                     description={t('settings.max_downloads_desc')}
-                                    control={<SettingsStepper value={settings.maxConcurrentDownloads} minimum={1} maximum={10} label={t('settings.concurrent_downloads')} onChange={value => updateSetting('maxConcurrentDownloads', value)} />}
+                                    control={<SettingsStepper value={settings.maxConcurrentDownloads} minimum={1} maximum={16} label={t('settings.concurrent_downloads')} onChange={value => updateSetting('maxConcurrentDownloads', value)} />}
                                 />
 
                                 <SettingsRow icon={<FolderArchive className="h-4 w-4 text-telegram-subtext" />} title={t('settings.zip_before_upload')} description={t('settings.zip_folders_desc')} control={<SettingsToggle checked={settings.zipFolders} label={t('settings.zip_before_upload')} onChange={() => updateSetting('zipFolders', !settings.zipFolders)} />} />
@@ -933,6 +934,8 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                     <HardDrive className="w-3.5 h-3.5" />
                                     {t('settings.storage')}
                                 </h3>
+
+                                <PortableMigrationSection />
 
                                 {/* Transcode Cache Size */}
                                 <div className="p-3 rounded-lg bg-telegram-hover/50 space-y-2">
@@ -1703,7 +1706,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                                 {settings.archiveMaxBytes === 0 ? t('settings.unlimited') : `${settings.archiveMaxBytes} MiB`}
                                             </span>
                                         </div>
-                                        <input type="range" min="0" max="2048" step="64" value={settings.archiveMaxBytes}
+                                        <input type="range" min="0" max="4096" step="64" value={settings.archiveMaxBytes}
                                             aria-label={t('settings.bulk_archive_limit')}
                                             onChange={e => updateSetting('archiveMaxBytes', parseInt(e.target.value))}
                                             className="w-full h-1.5 rounded-full appearance-none bg-telegram-border accent-telegram-primary cursor-pointer" />

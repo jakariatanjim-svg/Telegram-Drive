@@ -1,7 +1,7 @@
 import type { UploadProtectionIntent } from '../types/encryption';
 import type { VideoUploadMode } from '../types/settings';
 
-const TELEGRAM_MEDIA_VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'mov']);
+const TELEGRAM_MEDIA_VIDEO_EXTENSIONS = new Set(['mp4', 'm4v', 'mov', 'webm', 'mkv']);
 
 export function supportsTelegramMediaUpload(path: string): boolean {
   const cleanPath = path.split(/[?#]/, 1)[0];
@@ -11,8 +11,7 @@ export function supportsTelegramMediaUpload(path: string): boolean {
 
 /**
  * Telegram can only inspect and stream plaintext video bytes. Protected files
- * and formats whose metadata cannot be read by the native MP4 parser stay as
- * documents even when media is the preferred default.
+ * stay encrypted documents even when streamable media is selected.
  */
 export function effectiveVideoUploadMode(
   path: string,

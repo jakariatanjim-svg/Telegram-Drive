@@ -27,8 +27,10 @@ export function BandwidthSettings() {
     return () => { cancelled = true; };
   }, [isLoaded]);
   const save = async () => {
-    const bytes = Math.round(Number(quota) * 1024 ** 3);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) { setFailed(true); return; }
+    const numeric = Number(quota);
+    if (!Number.isFinite(numeric) || numeric < 0) { setFailed(true); return; }
+    const bytes = Math.round(numeric * 1024 ** 3);
+    if (!Number.isSafeInteger(bytes)) { setFailed(true); return; }
     setSaving(true);
     try {
       const stats = await invoke<{ limit_bytes: number }>('cmd_set_weekly_quota', { limitBytes: bytes });

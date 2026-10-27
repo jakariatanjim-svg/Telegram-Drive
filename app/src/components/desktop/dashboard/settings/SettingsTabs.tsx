@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import type { TFunction } from 'i18next';
 import { EncryptionSettingsSection } from '../../../shared/EncryptionSettingsSection';
 import { ThemesTab } from '../ThemesTab';
+import { PortableMigrationSection } from './PortableMigrationSection';
 import { useConfirm } from '../../../../context/ConfirmContext';
 import type { Settings } from '../../../../types/settings';
 import {
@@ -199,6 +200,7 @@ export function PrivacySettingsTab({ settings, onSettingsChange, onSettingsSyncE
         </div>
         <p className="rounded-lg border border-app-border-subtle p-3 text-xs leading-5 text-app-text-secondary"><strong className="text-app-text">Privacy policy summary:</strong> Telegram Drive does not sell personal data, inspect file contents for analytics, or operate a cloud account database. Revoking a share or disabling a local server stops that access immediately.</p>
       </section>
+      <PortableMigrationSection />
       <SettingsSyncSection settings={settings} onSettingsChange={onSettingsChange} onEnabledChange={onSettingsSyncEnabledChange} />
     </motion.section>
   );

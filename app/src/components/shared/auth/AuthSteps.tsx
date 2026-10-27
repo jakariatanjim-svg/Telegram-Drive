@@ -1,6 +1,6 @@
 import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowRight, ExternalLink, HelpCircle, Key, Lock, Phone, QrCode } from 'lucide-react';
+import { ArrowRight, CheckCircle2, ExternalLink, FolderOpen, HelpCircle, Key, Lock, Phone, QrCode, Upload } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../../i18n';
@@ -35,22 +35,28 @@ interface AuthSetupStepProps {
   apiId: string;
   apiHash: string;
   isMobile: boolean;
+  importingPortable?: boolean;
   onApiIdChange: (value: string) => void;
   onApiHashChange: (value: string) => void;
   onSubmit: (event: FormEvent) => void;
   onShowHelp: () => void;
   onDevLogin: () => void;
+  onImportPortableFile?: () => void;
+  onImportPortableFolder?: () => void;
 }
 
 export function AuthSetupStep({
   apiId,
   apiHash,
   isMobile,
+  importingPortable = false,
   onApiIdChange,
   onApiHashChange,
   onSubmit,
   onShowHelp,
   onDevLogin,
+  onImportPortableFile,
+  onImportPortableFolder,
 }: AuthSetupStepProps) {
   const { t } = useTranslation();
   return (
@@ -77,12 +83,41 @@ export function AuthSetupStep({
           </div>
         </div>
       </div>
-      <button type="submit" className="quiet-control auth-primary-action">
+      <button type="submit" disabled={importingPortable} className="quiet-control auth-primary-action disabled:opacity-50">
         {isMobile ? t('auth_copy.continue_phone') : t('auth_copy.continue_qr')} <ArrowRight className="h-4 w-4 rtl:rotate-180" />
       </button>
       <button type="button" onClick={onShowHelp} className="quiet-control auth-secondary-action w-full">
         <HelpCircle className="w-3 h-3" /> {i18n.t("auth.how_to_get_credentials")}
       </button>
+      {!isMobile && (onImportPortableFile || onImportPortableFolder) && (
+        <div className="pt-1 space-y-2 border-t border-app-border-subtle">
+          <p className="text-center text-[11px] text-app-text-tertiary">
+            Moving from another folder or PC? Restore your existing portable data:
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            {onImportPortableFile && (
+              <button
+                type="button"
+                disabled={importingPortable}
+                onClick={onImportPortableFile}
+                className="quiet-control auth-secondary-action w-full text-xs disabled:opacity-50"
+              >
+                <Upload className="w-3.5 h-3.5" /> Import .tdmigrate
+              </button>
+            )}
+            {onImportPortableFolder && (
+              <button
+                type="button"
+                disabled={importingPortable}
+                onClick={onImportPortableFolder}
+                className="quiet-control auth-secondary-action w-full text-xs disabled:opacity-50"
+              >
+                <FolderOpen className="w-3.5 h-3.5" /> Import Folder
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {import.meta.env.DEV && (
         <button type="button" onClick={onDevLogin} className="quiet-control auth-secondary-action w-full text-app-danger">{i18n.t("auth.dev_mode")}</button>
       )}
@@ -97,6 +132,7 @@ interface AuthMethodStepProps {
   phone: string;
   qrUrl: string | null;
   qrPolling: boolean;
+  qrScanned?: boolean;
   onPhoneChange: (value: string) => void;
   onSelectPhone: () => void;
   onSelectQr: () => void;
@@ -112,6 +148,7 @@ export function AuthMethodStep({
   phone,
   qrUrl,
   qrPolling,
+  qrScanned = false,
   onPhoneChange,
   onSelectPhone,
   onSelectQr,
@@ -164,12 +201,17 @@ export function AuthMethodStep({
                 <p className="text-ui text-app-text">{i18n.t("auth.scan_qr")}</p>
                 <p className="text-metadata text-app-text-tertiary">{i18n.t('auth_copy.qr_path')}</p>
               </div>
-              {qrPolling && (
+              {qrScanned ? (
+                <div className="flex items-center gap-2 text-metadata font-medium text-emerald-400">
+                  <CheckCircle2 className="h-4 w-4 animate-pulse" />
+                  <span>{i18n.t("auth.verifying")}</span>
+                </div>
+              ) : qrPolling ? (
                 <div className="flex items-center gap-2 text-metadata text-app-accent">
                   <div className="h-3 w-3 animate-spin rounded-full border-2 border-app-border border-t-app-accent" /> {i18n.t("auth.waiting_for_scan")}
                 </div>
-              )}
-              <button type="button" onClick={onQrLogin} className="quiet-control auth-secondary-action px-2">{i18n.t("auth.refresh_qr")}</button>
+              ) : null}
+              <button type="button" disabled={loading || qrScanned} onClick={onQrLogin} className="quiet-control auth-secondary-action px-2 disabled:opacity-45">{i18n.t("auth.refresh_qr")}</button>
             </>
           )}
           <button type="button" onClick={onBack} className="quiet-control auth-secondary-action w-full">{i18n.t("auth.back_to_config")}</button>

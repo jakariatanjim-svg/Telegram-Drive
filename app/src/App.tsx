@@ -110,7 +110,7 @@ function AppContent() {
         await invoke("cmd_get_startup_health");
         setStartupProgress({ stage: "session", percent: 38 });
         const store = await load("config.json");
-        const savedId = await store.get<string>("api_id");
+        let savedId = await store.get<string | number>("api_id");
         const legacyApiHash = await store.get<string>("api_hash");
         if (legacyApiHash) {
           try {
@@ -124,13 +124,27 @@ function AppContent() {
         }
 
         if (!savedId) {
+          // Self-heal from persisted engine database if config.json lacked api_id
+          const savedInfo = await invoke<{
+            apiId?: number | null;
+            hasApiHash?: boolean;
+            hasSession?: boolean;
+          } | null>("cmd_get_saved_session_info").catch(() => null);
+          if (savedInfo?.apiId && savedInfo.hasApiHash && savedInfo.hasSession) {
+            savedId = String(savedInfo.apiId);
+            await store.set("api_id", String(savedInfo.apiId));
+            await store.save();
+          }
+        }
+
+        if (!savedId) {
           setStartupProgress({ stage: "empty", percent: 100 });
           setAuthStatus("unauthenticated");
           return;
         }
 
-        const apiId = parseInt(savedId, 10);
-        if (isNaN(apiId)) {
+        const apiId = typeof savedId === "number" ? savedId : parseInt(String(savedId), 10);
+        if (isNaN(apiId) || apiId <= 0) {
           setStartupProgress({ stage: "invalid", percent: 100 });
           setAuthStatus("unauthenticated");
           return;
@@ -140,7 +154,7 @@ function AppContent() {
         setStartupProgress({ stage: "connect", percent: 58 });
         await invoke("cmd_connect", { apiId });
 
-        // Verify the session is still valid with Telegram servers
+        // Verify the session is still valid with Telegram servers (offline-resilient)
         setStartupProgress({ stage: "account", percent: 82 });
         const ok = await invoke<boolean>("cmd_check_connection");
         if (ok) {
@@ -149,15 +163,8 @@ function AppContent() {
           setAuthStatus("unauthenticated");
         }
       } catch (err) {
-        console.warn("Session restore failed, showing login:", err);
-        // Session file is corrupt or revoked — clean up and show login
-        try {
-          const store = await load("config.json");
-          await store.delete("api_id");
-          await store.save();
-        } catch {
-          // best-effort cleanup
-        }
+        console.warn("Session restore encountered an error; preserving saved credentials:", err);
+        // Never wipe saved api_id on transient startup errors; only explicit logout clears credentials.
         setAuthStatus("unauthenticated");
       }
     };

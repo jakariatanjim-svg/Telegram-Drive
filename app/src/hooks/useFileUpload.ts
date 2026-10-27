@@ -17,7 +17,7 @@ import { triggerHaptic } from '../services/feedback';
 import { isTransientNetworkError, restoreUploadQueue, serializeUploadQueue } from '../services/transferQueuePolicy';
 import { userFacingError } from '../services/userFacingError';
 import { invalidateFolderFileQueries } from '../services/fileListRefresh';
-import { effectiveVideoUploadMode } from '../services/videoUploadMode';
+import { effectiveVideoUploadMode, supportsTelegramMediaUpload } from '../services/videoUploadMode';
 import {
     clearTerminalTransfers,
     configureDesktopTransferLimits,
@@ -79,10 +79,12 @@ export function useFileUpload(
     const startingItemsRef = useRef<Set<string>>(new Set());
     const uploadQueueRef = useRef(uploadQueue);
     const androidNetworkAvailableRef = useRef(androidNetworkAvailable);
+    const videoUploadModeRef = useRef(settings.videoUploadMode);
     const desktopRevisionsRef = useRef<Map<string, number>>(new Map());
     const desktopStatusesRef = useRef<Map<string, string>>(new Map());
     uploadQueueRef.current = uploadQueue;
     androidNetworkAvailableRef.current = androidNetworkAvailable;
+    videoUploadModeRef.current = settings.videoUploadMode;
 
     // Listen for progress events from Rust
     useEffect(() => {
@@ -447,9 +449,9 @@ export function useFileUpload(
                         protection: i.protection ? { ...i.protection, promptToken: undefined } : protection,
                     } : i));
                     toast.warning(t('settings.encryption_mode_passphrase'));
-                } else if (errMsg.includes('FILE_TOO_BIG') || errMsg.includes('too large') || errMsg.includes('2 GB')) {
+                } else if (errMsg.includes('FILE_TOO_BIG') || errMsg.includes('too large')) {
                     setUploadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'error', error: errMsg } : i));
-                    toast.error(`Upload failed: Telegram has a 2 GB file size limit. Try splitting large folders.`);
+                    toast.error('Upload rejected by Telegram server size limit (2 GB standard / 4 GB Telegram Premium).');
                 } else if (isAndroidPlatform && isTransientNetworkError(errMsg)) {
                     keepTemporaryFileForResume = true;
                     setUploadQueue(q => q.map(i => i.id === item.id ? {
@@ -525,9 +527,9 @@ export function useFileUpload(
         }
     };
 
-    const chooseAndStageProtection = async (count: number): Promise<UploadProtectionIntent[] | null> => {
+    const chooseAndStageProtection = async (count: number, hasVideo = false): Promise<UploadProtectionIntent[] | null> => {
         requireCurrent();
-        const choice: UploadChoice | null = await chooseUploadProtection(count);
+        const choice: UploadChoice | null = await chooseUploadProtection(count, { hasVideo });
         requireCurrent();
         if (!choice) return null;
         if (choice === 'store') {
@@ -547,7 +549,8 @@ export function useFileUpload(
     ): Promise<number> => {
         if (!paths || paths.length === 0) return 0;
         if (!isCurrent() || !actionOwnerId || ownerRef.current !== actionOwnerId) throw new Error("ACCOUNT_CHANGED");
-        const protection = await chooseAndStageProtection(paths.length);
+        const hasVideo = paths.some(p => supportsTelegramMediaUpload(p));
+        const protection = await chooseAndStageProtection(paths.length, hasVideo);
         if (!protection) return 0;
         const preparedPaths: Array<{ path: string; androidStaged: boolean }> = [];
         try {
@@ -577,7 +580,7 @@ export function useFileUpload(
             videoUploadMode: effectiveVideoUploadMode(
                 paths[index],
                 protection[index],
-                settings.videoUploadMode,
+                videoUploadModeRef.current,
             ),
             videoFilenameCaption: settings.videoFilenameCaption,
         }));

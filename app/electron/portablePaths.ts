@@ -17,6 +17,7 @@ export interface PortablePaths {
   thumbnailsCacheDir: string;
   offlineCacheDir: string;
   stagingCacheDir: string;
+  transcodeCacheDir: string;
 }
 
 let cachedPaths: PortablePaths | null = null;
@@ -52,6 +53,7 @@ export function initPortablePaths(app: App): PortablePaths {
     thumbnailsCacheDir: path.join(dataRoot, 'cache', 'thumbnails'),
     offlineCacheDir: path.join(dataRoot, 'cache', 'offline'),
     stagingCacheDir: path.join(dataRoot, 'cache', 'staging'),
+    transcodeCacheDir: path.join(dataRoot, 'cache', 'transcode'),
   };
 
   for (const dir of Object.values(paths)) {

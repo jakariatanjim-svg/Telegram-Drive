@@ -31,13 +31,24 @@ import {
 } from '../shared/mtprotoHelpers';
 import { LocalServersManager, type ShareRecord } from './localServers';
 import {
+  PersistentMtprotoStorage,
+  atomicWriteFileSync,
   createNodeTelegramClient,
   readEncryptedSecretFile,
   writeEncryptedSecretFile,
   type ProxySettingsConfig,
 } from './mtprotoNode';
+import {
+  exportPortableDataBundle,
+  getPortableMigrationInfo,
+  importPortableDataBundleOrFolder,
+  launchRelocatedAppAndExit,
+  relocatePortableApp,
+} from './portableMigration';
 import { getPortablePaths } from './portablePaths';
+import { VideoTranscodeManager } from './transcoder';
 import { checkGithubUpdate, downloadAndInstallWindowsUpdate } from './updater';
+import { runRobustQrSignIn } from '../shared/qrAuthLoop';
 
 export type EventEmitterFn = (event: string, payload: unknown) => void;
 
@@ -82,6 +93,9 @@ interface StoredSyncConflict {
 interface PersistedDatabase {
   deviceId: string;
   apiId: number | null;
+  lastUserId: string | null;
+  cachedFilesByFolder: Record<string, MappedTelegramFile[]>;
+  weeklyQuotaBytes: number;
   proxy: ProxySettingsConfig;
   vpnCompat: { enabled: boolean; preferIpv4: boolean; bindInterface?: string | null };
   desktopPreferences: Record<string, unknown>;
@@ -216,12 +230,32 @@ function resolveCollisionSavePath(
   return { finalPath: requestedPath, outcome: 'overwritten', skip: false };
 }
 
+export interface ExternalLifecycleHooks {
+  flushStoresSync?: () => void;
+  reloadStoresSync?: () => void;
+  triggerAppQuit?: () => void;
+}
+
+function isFatalTelegramAuthError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+  return /AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|AUTH_KEY_DUPLICATED|USER_DEACTIVATED|USER_DEACTIVATED_BAN|SESSION_REVOKED|SESSION_EXPIRED/i.test(
+    text,
+  );
+}
+
+function isPeerCacheMissError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+  return /MtPeerNotFoundError|not found in local cache|CHANNEL_INVALID|PEER_ID_INVALID/i.test(text);
+}
+
 export class DesktopEngine {
   private db!: PersistedDatabase;
   private dbFilePath!: string;
   private sessionFilePath!: string;
+  private mtprotoStorageFilePath!: string;
   private apiHashFilePath!: string;
   private saveTimer: NodeJS.Timeout | null = null;
+  private mtprotoStorage: PersistentMtprotoStorage | null = null;
 
   private client: TelegramClient | null = null;
   private currentApiHash: string | null = null;
@@ -254,7 +288,9 @@ export class DesktopEngine {
   };
 
   public readonly vault = new VaultRuntime();
+  public readonly transcoder = new VideoTranscodeManager();
   public readonly servers: LocalServersManager;
+  private lifecycleHooks: ExternalLifecycleHooks = {};
 
   private filesCache = new Map<string, MappedTelegramFile[]>();
   private transfers = new Map<string, TransferJobRecord>();
@@ -263,7 +299,7 @@ export class DesktopEngine {
   private maxConcurrentDownloads = 3;
   private syncWatchers = new Map<number, fs.FSWatcher>();
 
-  constructor(private readonly emitEvent: EventEmitterFn) {
+  constructor(private readonly emitEvent: EventEmitterFn = () => {}) {
     this.servers = new LocalServersManager({
       resolveFileMeta: async (folderId, messageId) => {
         const msg = await this.fetchSingleMessage(folderId, messageId);
@@ -321,16 +357,26 @@ export class DesktopEngine {
         const created = await this.createDriveFolder(name);
         return { id: created.id, name: created.name };
       },
+      resolveHlsAssetPath: (fileKey, quality, assetName) =>
+        this.transcoder.resolveHlsAssetPath(fileKey, quality, assetName),
+      resolveFmp4Path: fileKey => this.transcoder.resolveFmp4Path(fileKey),
     });
+  }
+
+  public setLifecycleHooks(hooks: ExternalLifecycleHooks): void {
+    this.lifecycleHooks = hooks;
   }
 
   async initialize(): Promise<void> {
     const paths = getPortablePaths();
     this.dbFilePath = path.join(paths.dbDir, 'state.json');
     this.sessionFilePath = path.join(paths.sessionDir, 'mtproto.session.enc');
+    this.mtprotoStorageFilePath = path.join(paths.sessionDir, 'mtproto-storage.enc');
     this.apiHashFilePath = path.join(paths.sessionDir, 'api_hash.enc');
 
     this.loadDatabase();
+    this.hydrateFilesCacheFromDb();
+    this.currentUserId = this.db.lastUserId ?? null;
     this.vault.loadPersisted(this.db.vaultData);
 
     await this.servers.startMediaServer(14201);
@@ -351,10 +397,31 @@ export class DesktopEngine {
     this.refreshFolderWatchers();
   }
 
+  private hydrateFilesCacheFromDb(): void {
+    this.filesCache.clear();
+    const saved = this.db.cachedFilesByFolder ?? {};
+    for (const [folderKey, files] of Object.entries(saved)) {
+      if (Array.isArray(files)) {
+        this.filesCache.set(folderKey, files);
+      }
+    }
+  }
+
+  private syncFilesCacheToDb(): void {
+    const next: Record<string, MappedTelegramFile[]> = {};
+    for (const [k, files] of this.filesCache.entries()) {
+      next[k] = files;
+    }
+    this.db.cachedFilesByFolder = next;
+  }
+
   private loadDatabase(): void {
     const defaults: PersistedDatabase = {
       deviceId: nodeCrypto.randomUUID(),
       apiId: null,
+      lastUserId: null,
+      cachedFilesByFolder: {},
+      weeklyQuotaBytes: 0,
       proxy: { enabled: false, type: 'socks5', host: '127.0.0.1', port: 1080 },
       vpnCompat: { enabled: false, preferIpv4: true, bindInterface: null },
       desktopPreferences: {
@@ -423,6 +490,7 @@ export class DesktopEngine {
 
   private scheduleSave(): void {
     this.db.vaultData = this.vault.exportPersisted();
+    this.syncFilesCacheToDb();
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
@@ -431,11 +499,19 @@ export class DesktopEngine {
   }
 
   public flushDatabase(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     this.db.vaultData = this.vault.exportPersisted();
-    const tmp = `${this.dbFilePath}.tmp`;
-    fs.mkdirSync(path.dirname(this.dbFilePath), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(this.db, null, 2), 'utf8');
-    fs.renameSync(tmp, this.dbFilePath);
+    this.syncFilesCacheToDb();
+    atomicWriteFileSync(this.dbFilePath, JSON.stringify(this.db, null, 2));
+  }
+
+  public flushSync(): void {
+    this.flushDatabase();
+    this.mtprotoStorage?.flushSync();
+    this.lifecycleHooks.flushStoresSync?.();
   }
 
   public getDesktopPreferences(): Record<string, unknown> {
@@ -443,6 +519,7 @@ export class DesktopEngine {
   }
 
   private async persistMtprotoSession(): Promise<void> {
+    this.mtprotoStorage?.flushSync();
     if (!this.client) return;
     try {
       const exported = await this.client.exportSession();
@@ -452,6 +529,7 @@ export class DesktopEngine {
     } catch {
       // Session may not be authorized yet during intermediate auth step
     }
+    this.mtprotoStorage?.flushSync();
   }
 
   private async ensureClient(apiId?: number, apiHash?: string): Promise<TelegramClient> {
@@ -471,6 +549,7 @@ export class DesktopEngine {
     }
 
     if (this.client) {
+      this.mtprotoStorage?.flushSync();
       await this.client.destroy().catch(() => undefined);
       this.client = null;
       this.currentApiHash = null;
@@ -479,18 +558,28 @@ export class DesktopEngine {
     this.db.apiId = resolvedId;
     this.scheduleSave();
 
+    if (!this.mtprotoStorage) {
+      this.mtprotoStorage = new PersistentMtprotoStorage(this.mtprotoStorageFilePath);
+    } else {
+      this.mtprotoStorage.loadFromDiskSync();
+    }
+
     const client = await createNodeTelegramClient({
       apiId: resolvedId,
       apiHash: resolvedHash,
+      storage: this.mtprotoStorage,
       getProxy: () => (this.db.proxy.enabled ? this.db.proxy : null),
     });
 
-    const savedSession = readEncryptedSecretFile(this.sessionFilePath);
-    if (savedSession) {
-      try {
-        await client.importSession(savedSession, true);
-      } catch {
-        // Ignore stale session string
+    if (!this.mtprotoStorage.hasAuthKey()) {
+      const savedSession = readEncryptedSecretFile(this.sessionFilePath);
+      if (savedSession) {
+        try {
+          await client.importSession(savedSession, true);
+          this.mtprotoStorage.flushSync();
+        } catch {
+          // Ignore stale session string
+        }
       }
     }
 
@@ -501,13 +590,35 @@ export class DesktopEngine {
 
   private async getAccountOwnerId(): Promise<string> {
     if (this.currentUserId) return this.currentUserId;
+    if (this.db.lastUserId) {
+      this.currentUserId = this.db.lastUserId;
+      return this.currentUserId;
+    }
     throw new Error('NOT_CONNECTED');
   }
 
-  private async fetchSingleMessage(folderId: number | null, messageId: number): Promise<Message> {
+  private async withResolvedFolderPeer<T>(
+    folderId: number | null,
+    operation: (client: TelegramClient, peer: 'self' | number) => Promise<T>,
+  ): Promise<T> {
     const client = await this.ensureClient();
     const peer = folderIdToPeer(folderId);
-    const messages = await client.getMessages(peer, [messageId]);
+    try {
+      return await operation(client, peer);
+    } catch (err) {
+      if (folderId !== null && folderId !== 0 && isPeerCacheMissError(err)) {
+        await this.scanDriveFolders().catch(() => undefined);
+        this.mtprotoStorage?.flushSync();
+        return await operation(client, peer);
+      }
+      throw err;
+    }
+  }
+
+  private async fetchSingleMessage(folderId: number | null, messageId: number): Promise<Message> {
+    const messages = await this.withResolvedFolderPeer(folderId, (client, peer) =>
+      client.getMessages(peer, [messageId]),
+    );
     const msg = messages[0];
     if (!msg) throw new Error('MESSAGE_NOT_FOUND');
     return msg;
@@ -590,14 +701,14 @@ export class DesktopEngine {
     folderId: number | null,
     onChunk?: (chunk: MappedTelegramFile[]) => void,
   ): Promise<MappedTelegramFile[]> {
-    const client = await this.ensureClient();
-    const peer = folderIdToPeer(folderId);
     const out: MappedTelegramFile[] = [];
     const vaultUnlocked = this.vault.getStatus().is_unlocked;
     let offset: { id: number; date: number } | undefined;
 
     for (let page = 0; page < 5; page++) {
-      const history = await client.getHistory(peer, { limit: 100, offset });
+      const history = await this.withResolvedFolderPeer(folderId, (client, peer) =>
+        client.getHistory(peer, { limit: 100, offset }),
+      );
       if (history.length === 0) break;
       const pageFiles: MappedTelegramFile[] = [];
       for (const msg of history) {
@@ -621,6 +732,8 @@ export class DesktopEngine {
     }
 
     this.filesCache.set(String(folderId ?? 'saved'), out);
+    this.mtprotoStorage?.flushSync();
+    this.scheduleSave();
     return out;
   }
 
@@ -657,6 +770,7 @@ export class DesktopEngine {
       }
     }
     this.db.folders.sort((a, b) => a.sort_order - b.sort_order);
+    this.mtprotoStorage?.flushSync();
     this.scheduleSave();
     return this.db.folders;
   }
@@ -1167,21 +1281,50 @@ export class DesktopEngine {
         this.currentApiHash = null;
         return null;
 
+      case 'cmd_get_saved_session_info': {
+        const hasSession =
+          fs.existsSync(this.sessionFilePath) || fs.existsSync(this.mtprotoStorageFilePath);
+        const hasApiHash = Boolean(readEncryptedSecretFile(this.apiHashFilePath));
+        return {
+          apiId: this.db.apiId,
+          hasApiHash,
+          hasSession,
+          lastUserId: this.db.lastUserId,
+        };
+      }
+
       case 'cmd_connect': {
-        const apiId = Number(args.apiId);
+        const apiId = Number(args.apiId || this.db.apiId || 0);
         await this.ensureClient(apiId);
         return true;
       }
 
       case 'cmd_check_connection': {
+        const hasSessionOnDisk =
+          fs.existsSync(this.sessionFilePath) || fs.existsSync(this.mtprotoStorageFilePath);
+        if (!hasSessionOnDisk) return false;
         try {
-          if (!fs.existsSync(this.sessionFilePath)) return false;
           const client = await this.ensureClient();
           const me = await client.getMe();
           this.currentUserId = String(me.id);
+          this.db.lastUserId = this.currentUserId;
           await this.persistMtprotoSession();
+          this.flushDatabase();
           return true;
-        } catch {
+        } catch (err) {
+          if (isFatalTelegramAuthError(err)) {
+            this.currentUserId = null;
+            this.db.lastUserId = null;
+            this.mtprotoStorage?.clearDisk();
+            fs.rmSync(this.sessionFilePath, { force: true });
+            this.flushDatabase();
+            return false;
+          }
+          // Preserve authenticated state across offline PC boot / temporary network outage
+          if (this.db.lastUserId) {
+            this.currentUserId = this.db.lastUserId;
+            return true;
+          }
           return false;
         }
       }
@@ -1197,7 +1340,9 @@ export class DesktopEngine {
         const res = await client.sendCode({ phone });
         if (res instanceof User) {
           this.currentUserId = String(res.id);
+          this.db.lastUserId = this.currentUserId;
           await this.persistMtprotoSession();
+          this.flushDatabase();
           return {
             status: 'authorized',
             delivery: 'telegram_app',
@@ -1239,7 +1384,9 @@ export class DesktopEngine {
             phoneCode: code,
           });
           this.currentUserId = String(user.id);
+          this.db.lastUserId = this.currentUserId;
           await this.persistMtprotoSession();
+          this.flushDatabase();
           return { success: true };
         } catch (err) {
           const errStr = String(err);
@@ -1266,13 +1413,18 @@ export class DesktopEngine {
         const client = await this.ensureClient();
         const user = await client.checkPassword(password);
         this.currentUserId = String(user.id);
+        this.db.lastUserId = this.currentUserId;
         await this.persistMtprotoSession();
+        this.flushDatabase();
         return { success: true };
       }
 
       case 'cmd_auth_qr_login': {
-        const apiId = Number(args.apiId);
-        const apiHash = String(args.apiHash ?? '').trim();
+        const apiId = Number(args.apiId || this.db.apiId || 0);
+        const apiHash =
+          String(args.apiHash ?? '').trim() ||
+          readEncryptedSecretFile(this.apiHashFilePath) ||
+          '';
         if (apiHash) writeEncryptedSecretFile(this.apiHashFilePath, apiHash);
         this.qrState.abort?.abort();
         const abort = new AbortController();
@@ -1296,43 +1448,59 @@ export class DesktopEngine {
             }
           }, 20_000);
 
-          void client
-            .signInQr({
-              abortSignal: abort.signal,
-              onUrlUpdated: url => {
-                this.qrState.latestUrl = url;
-                if (!settledFirstUrl) {
-                  settledFirstUrl = true;
-                  clearTimeout(timer);
-                  resolve(url);
-                }
-              },
-              onQrScanned: () => {
-                this.qrState.scanned = true;
-              },
-              password: () =>
-                new Promise<string>(resPw => {
-                  this.qrState.needsPassword = true;
-                  this.qrState.providePassword = resPw;
-                }),
-              invalidPasswordCallback: () => {
-                const pending = this.qrState.pendingPasswordResult;
-                this.qrState.pendingPasswordResult = undefined;
-                pending?.reject(new Error('PASSWORD_HASH_INVALID'));
-              },
-            })
+          void runRobustQrSignIn(client, {
+            abortSignal: abort.signal,
+            pollIntervalMs: 1800,
+            onUrlUpdated: (url, expiresAt) => {
+              this.qrState.latestUrl = url;
+              this.emitEvent('qr-auth-update', {
+                status: 'url',
+                url,
+                expiresAt: expiresAt.getTime(),
+              });
+              if (!settledFirstUrl) {
+                settledFirstUrl = true;
+                clearTimeout(timer);
+                resolve(url);
+              }
+            },
+            onQrScanned: () => {
+              this.qrState.scanned = true;
+              this.emitEvent('qr-auth-update', { status: 'scanned' });
+            },
+            password: () =>
+              new Promise<string>(resPw => {
+                this.qrState.needsPassword = true;
+                this.qrState.providePassword = resPw;
+                this.emitEvent('qr-auth-update', { status: 'password_required' });
+              }),
+            invalidPasswordCallback: () => {
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              this.qrState.needsPassword = true;
+              pending?.reject(new Error('PASSWORD_HASH_INVALID'));
+            },
+          })
             .then(async user => {
               this.currentUserId = String(user.id);
+              this.db.lastUserId = this.currentUserId;
               await this.persistMtprotoSession();
+              this.flushDatabase();
               this.qrState.authorized = true;
+              this.emitEvent('qr-auth-update', { status: 'authorized' });
               const pending = this.qrState.pendingPasswordResult;
               this.qrState.pendingPasswordResult = undefined;
               pending?.resolve();
             })
             .catch(err => {
               clearTimeout(timer);
+              if (abort.signal.aborted) return;
               const normalized = err instanceof Error ? err : new Error(String(err));
               this.qrState.error = normalized.message;
+              this.emitEvent('qr-auth-update', {
+                status: 'error',
+                error: normalized.message,
+              });
               const pending = this.qrState.pendingPasswordResult;
               this.qrState.pendingPasswordResult = undefined;
               pending?.reject(normalized);
@@ -1346,6 +1514,12 @@ export class DesktopEngine {
         return await firstUrlPromise;
       }
 
+      case 'cmd_auth_qr_cancel': {
+        this.qrState.abort?.abort();
+        this.qrState.abort = null;
+        return null;
+      }
+
       case 'cmd_auth_qr_poll': {
         if (this.qrState.authorized) {
           return { success: true };
@@ -1356,7 +1530,11 @@ export class DesktopEngine {
         if (this.qrState.error) {
           throw new Error(this.qrState.error);
         }
-        return { success: false, url: this.qrState.latestUrl };
+        return {
+          success: false,
+          url: this.qrState.latestUrl,
+          scanned: this.qrState.scanned,
+        };
       }
 
       case 'cmd_logout': {
@@ -1374,9 +1552,13 @@ export class DesktopEngine {
           this.currentApiHash = null;
         }
         this.currentUserId = null;
+        this.db.lastUserId = null;
+        this.db.cachedFilesByFolder = {};
         this.filesCache.clear();
         this.vault.lock();
+        this.mtprotoStorage?.clearDisk();
         fs.rmSync(this.sessionFilePath, { force: true });
+        this.flushDatabase();
         return { signed_out: true, remote_session_revoked: remoteRevoked };
       }
 
@@ -2415,25 +2597,84 @@ export class DesktopEngine {
           needs_transcode: false,
         };
 
-      case 'cmd_get_cached_variants':
-        return [];
+      case 'cmd_get_cached_variants': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId ?? 0);
+        const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+        return this.transcoder.getCachedVariants(fileKey);
+      }
 
       case 'cmd_get_transcode_capabilities':
-        return {
-          ffmpeg_available: false,
-          hardware_encoder: null,
-          cache_size_bytes: 0,
-          max_cache_gb: this.db.transcodeCacheMaxGb,
-          entries: [],
-        };
+        return this.transcoder.getCapabilities(this.db.transcodeCacheMaxGb);
+
+      case 'cmd_prepare_transcoded_stream': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const quality = String(args.quality ?? '720p');
+        const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+
+        return await this.transcoder.prepareTranscode({
+          fileKey,
+          quality,
+          ensureSourceCached: async (targetPath, onProgress) => {
+            const key = fileCompositeKey(folderId, messageId);
+            const encRec = this.vault.getEncryptedFileRecord(key);
+            const rawBytes = await this.downloadRawTelegramBytes(
+              folderId,
+              messageId,
+              (done, total) => {
+                if (total > 0) onProgress(Math.round((done / total) * 100));
+              },
+            );
+            const finalBytes = encRec ? this.vault.decryptBuffer(rawBytes).plaintext : rawBytes;
+            atomicWriteFileSync(targetPath, Buffer.from(finalBytes));
+          },
+        });
+      }
+
+      case 'cmd_get_transcode_status':
+        return this.transcoder.getJobStatus(String(args.jobId ?? ''));
+
+      case 'cmd_get_master_playlist_info': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+        return this.transcoder.getMasterPlaylistInfo(fileKey);
+      }
+
+      case 'cmd_prepare_fmp4_stream': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+        return await this.transcoder.prepareFmp4Remux({
+          fileKey,
+          ensureSourceCached: async targetPath => {
+            const key = fileCompositeKey(folderId, messageId);
+            const encRec = this.vault.getEncryptedFileRecord(key);
+            const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId);
+            const finalBytes = encRec ? this.vault.decryptBuffer(rawBytes).plaintext : rawBytes;
+            atomicWriteFileSync(targetPath, Buffer.from(finalBytes));
+          },
+        });
+      }
+
+      case 'cmd_get_fmp4_status':
+        return this.transcoder.getFmp4Status(String(args.fileKey ?? ''));
 
       case 'cmd_set_transcode_cache_limit':
-        this.db.transcodeCacheMaxGb = Number(args.maxGb ?? 5);
+        this.db.transcodeCacheMaxGb = Math.max(1, Number(args.maxGb ?? 5));
         this.scheduleSave();
         return null;
 
       case 'cmd_clear_transcode_cache':
-        return 'Cleared 0 B';
+        return this.transcoder.clearCache(
+          typeof args.fileKey === 'string' && args.fileKey ? args.fileKey : undefined,
+          typeof args.quality === 'string' && args.quality ? args.quality : undefined,
+        );
 
       // ── Cleanup, Offline Packs & Device Storage ────────────────────
       case 'cmd_cleanup_list': {
@@ -3007,13 +3248,27 @@ export class DesktopEngine {
           date: new Date().toISOString().slice(0, 10),
           up_bytes: this.db.bandwidth.uploaded,
           down_bytes: this.db.bandwidth.downloaded,
-          limit_bytes: 0,
+          limit_bytes: this.db.weeklyQuotaBytes ?? 0,
           period: 'weekly',
           uploaded_bytes: this.db.bandwidth.uploaded,
           downloaded_bytes: this.db.bandwidth.downloaded,
         };
 
-      case 'cmd_set_weekly_quota':
+      case 'cmd_set_weekly_quota': {
+        const nextLimit = Math.max(0, Number(args.limitBytes ?? 0));
+        this.db.weeklyQuotaBytes = Number.isFinite(nextLimit) ? Math.round(nextLimit) : 0;
+        this.scheduleSave();
+        return {
+          date: new Date().toISOString().slice(0, 10),
+          up_bytes: this.db.bandwidth.uploaded,
+          down_bytes: this.db.bandwidth.downloaded,
+          limit_bytes: this.db.weeklyQuotaBytes,
+          period: 'weekly',
+          uploaded_bytes: this.db.bandwidth.uploaded,
+          downloaded_bytes: this.db.bandwidth.downloaded,
+        };
+      }
+
       case 'cmd_migrate_proxy_secret':
       case 'cmd_set_native_language':
       case 'cmd_workspace_cancel_asset':
@@ -3037,6 +3292,8 @@ export class DesktopEngine {
       }
 
       case 'cmd_get_detailed_transcode_cache':
+        return this.transcoder.scanCache(this.db.transcodeCacheMaxGb);
+
       case 'cmd_get_detailed_cache_info': {
         const paths = getPortablePaths();
         const previews = measureDirectory(paths.previewsCacheDir);
@@ -3207,6 +3464,68 @@ export class DesktopEngine {
         return true;
       }
 
+      // ── Portable App Relocation & Data Migration ───────────────────
+      case 'cmd_get_portable_migration_info':
+        return getPortableMigrationInfo();
+
+      case 'cmd_relocate_portable_app': {
+        const destinationDir = String(args.destinationDir ?? '');
+        const mode = args.mode === 'move' ? 'move' : 'copy';
+        const includeCaches = args.includeCaches !== false;
+        return await relocatePortableApp(
+          { destinationDir, mode, includeCaches },
+          {
+            flushAllSync: () => this.flushSync(),
+            onProgress: payload => this.emitEvent('migration-progress', payload),
+          },
+        );
+      }
+
+      case 'cmd_launch_relocated_app': {
+        const targetDir = String(args.targetDir ?? '');
+        const executablePath = String(args.executablePath ?? '');
+        const mode = args.mode === 'move' ? 'move' : 'copy';
+        return launchRelocatedAppAndExit(
+          { targetDir, executablePath, mode },
+          () => {
+            this.flushSync();
+            if (this.lifecycleHooks.triggerAppQuit) {
+              this.lifecycleHooks.triggerAppQuit();
+            } else {
+              app.quit();
+            }
+          },
+        );
+      }
+
+      case 'cmd_export_portable_data':
+      case 'cmd_export_portable_bundle': {
+        const outputFilePath = String(args.outputFilePath ?? args.outputPath ?? '');
+        if (!outputFilePath) throw new Error('MIGRATION_OUTPUT_REQUIRED');
+        return exportPortableDataBundle(outputFilePath, {
+          flushAllSync: () => this.flushSync(),
+        });
+      }
+
+      case 'cmd_import_portable_data':
+      case 'cmd_import_portable_bundle': {
+        const sourcePath = String(args.sourcePath ?? '');
+        if (!sourcePath) throw new Error('MIGRATION_SOURCE_REQUIRED');
+        if (this.client) {
+          await this.client.destroy().catch(() => undefined);
+          this.client = null;
+          this.currentApiHash = null;
+        }
+        this.mtprotoStorage = null;
+        const result = importPortableDataBundleOrFolder(sourcePath);
+        this.lifecycleHooks.reloadStoresSync?.();
+        this.loadDatabase();
+        this.hydrateFilesCacheFromDb();
+        this.currentUserId = this.db.lastUserId ?? null;
+        this.vault.loadPersisted(this.db.vaultData);
+        return result;
+      }
+
       default:
         return null;
     }
@@ -3215,12 +3534,14 @@ export class DesktopEngine {
   public async shutdown(): Promise<void> {
     for (const watcher of this.syncWatchers.values()) watcher.close();
     this.syncWatchers.clear();
+    this.transcoder.shutdownAll();
     await this.persistMtprotoSession();
-    this.flushDatabase();
+    this.flushSync();
     await this.servers.stopAll();
     if (this.client) {
       await this.client.destroy().catch(() => undefined);
       this.client = null;
     }
+    this.mtprotoStorage?.flushSync();
   }
 }

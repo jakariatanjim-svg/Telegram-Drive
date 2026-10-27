@@ -1,6 +1,8 @@
+import { load } from '@tauri-apps/plugin-store';
 import type { CustomTheme } from '../theme/themeEngine';
 import type { Theme, ThemePreference } from '../types/settings';
 
+const THEME_STORE_FILE = 'theme.json';
 const THEME_KEY = 'theme';
 const THEME_PREFERENCE_KEY = 'theme-preference';
 const USER_THEMES_KEY = 'user-themes';
@@ -9,6 +11,23 @@ const ACTIVE_CUSTOM_THEME_KEY = 'active-custom-theme-id';
 function storageOrDefault(storage?: Storage): Storage | null {
   if (storage) return storage;
   return typeof localStorage === 'undefined' ? null : localStorage;
+}
+
+// Hydrate localStorage from portable theme.json store on startup if localStorage was empty
+if (typeof window !== 'undefined') {
+  void (async () => {
+    try {
+      const store = await load(THEME_STORE_FILE);
+      for (const k of [THEME_KEY, THEME_PREFERENCE_KEY, USER_THEMES_KEY, ACTIVE_CUSTOM_THEME_KEY]) {
+        const val = await store.get<string>(k);
+        if (typeof val === 'string' && !localStorage.getItem(k)) {
+          localStorage.setItem(k, val);
+        }
+      }
+    } catch {
+      // Ignore outside Electron/Capacitor runtime
+    }
+  })();
 }
 
 export function readStorageValue(key: string, storage?: Storage): string | null {
@@ -24,6 +43,17 @@ export function writeStorageValue(key: string, value: string, storage?: Storage)
     storageOrDefault(storage)?.setItem(key, value);
   } catch {
     // Theme changes remain active in memory when storage is unavailable.
+  }
+  if (!storage) {
+    void (async () => {
+      try {
+        const store = await load(THEME_STORE_FILE);
+        await store.set(key, value);
+        await store.save();
+      } catch {
+        // Ignore store persistence failure in non-native tests
+      }
+    })();
   }
 }
 

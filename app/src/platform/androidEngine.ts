@@ -31,12 +31,16 @@ import {
 } from '../../shared/versioning';
 import { dispatchLocalEvent } from './eventBus';
 import { isAndroidNative, TelegramDriveNative } from './nativeBridge';
+import { runRobustQrSignIn } from '../../shared/qrAuthLoop';
 
 const STATE_STORAGE_KEY = 'telegram_drive_android_state_v1';
 
 interface AndroidPersistedState {
   deviceId: string;
   apiId: number | null;
+  lastUserId?: string | null;
+  cachedFilesByFolder?: Record<string, MappedTelegramFile[]>;
+  weeklyQuotaBytes?: number;
   hasAuthorizedSession?: boolean;
   folders: Array<{
     id: number;
@@ -144,6 +148,11 @@ class AndroidWebEngine {
 
   constructor() {
     this.state = this.loadState();
+    this.currentUserId = this.state.lastUserId ?? null;
+    const savedFiles = this.state.cachedFilesByFolder ?? {};
+    for (const [k, files] of Object.entries(savedFiles)) {
+      if (Array.isArray(files)) this.filesCache.set(k, files);
+    }
     this.vault.loadPersisted(this.state.vaultData);
   }
 
@@ -155,6 +164,9 @@ class AndroidWebEngine {
     const defaults: AndroidPersistedState = {
       deviceId: crypto.randomUUID(),
       apiId: null,
+      lastUserId: null,
+      cachedFilesByFolder: {},
+      weeklyQuotaBytes: 0,
       hasAuthorizedSession: false,
       folders: [],
       groups: [],
@@ -190,6 +202,11 @@ class AndroidWebEngine {
 
   private saveState(): void {
     this.state.vaultData = this.vault.exportPersisted();
+    const cached: Record<string, MappedTelegramFile[]> = {};
+    for (const [k, files] of this.filesCache.entries()) {
+      cached[k] = files;
+    }
+    this.state.cachedFilesByFolder = cached;
     try {
       localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(this.state));
     } catch {
@@ -265,6 +282,9 @@ class AndroidWebEngine {
       apiId: resolvedId,
       apiHash: resolvedHash,
       storage: new IdbStorage('telegram-drive-mtproto-session'),
+      storageOptions: {
+        saveInterval: 1000,
+      },
       updates: false,
       crypto: new WebCryptoProvider({ wasmInput: wasmModule }),
       transport: new WebSocketTransport(),
@@ -288,6 +308,10 @@ class AndroidWebEngine {
 
   private async getOwnerId(): Promise<string> {
     if (this.currentUserId) return this.currentUserId;
+    if (this.state.lastUserId) {
+      this.currentUserId = this.state.lastUserId;
+      return this.currentUserId;
+    }
     throw new Error('NOT_CONNECTED');
   }
 
@@ -365,6 +389,7 @@ class AndroidWebEngine {
     }
 
     this.filesCache.set(String(folderId ?? 'saved'), out);
+    this.saveState();
     return out;
   }
 
@@ -409,8 +434,18 @@ class AndroidWebEngine {
         this.currentApiHash = null;
         return null;
 
+      case 'cmd_get_saved_session_info': {
+        const hasApiHash = Boolean(await this.loadSecret('api_hash'));
+        return {
+          apiId: this.state.apiId,
+          hasApiHash,
+          hasSession: Boolean(this.state.hasAuthorizedSession),
+          lastUserId: this.state.lastUserId ?? null,
+        };
+      }
+
       case 'cmd_connect':
-        await this.ensureClient(Number(args.apiId));
+        await this.ensureClient(Number(args.apiId || this.state.apiId || 0));
         return true;
 
       case 'cmd_check_connection': {
@@ -421,10 +456,23 @@ class AndroidWebEngine {
           const client = await this.ensureClient();
           const me = await client.getMe();
           this.currentUserId = String(me.id);
+          this.state.lastUserId = this.currentUserId;
           this.state.hasAuthorizedSession = true;
           this.saveState();
           return true;
-        } catch {
+        } catch (err) {
+          const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+          if (/AUTH_KEY_UNREGISTERED|AUTH_KEY_INVALID|AUTH_KEY_DUPLICATED|USER_DEACTIVATED|SESSION_REVOKED|SESSION_EXPIRED/i.test(text)) {
+            this.currentUserId = null;
+            this.state.lastUserId = null;
+            this.state.hasAuthorizedSession = false;
+            this.saveState();
+            return false;
+          }
+          if (this.state.hasAuthorizedSession && this.state.lastUserId) {
+            this.currentUserId = this.state.lastUserId;
+            return true;
+          }
           return false;
         }
       }
@@ -439,6 +487,7 @@ class AndroidWebEngine {
         const res = await client.sendCode({ phone });
         if (res instanceof User) {
           this.currentUserId = String(res.id);
+          this.state.lastUserId = this.currentUserId;
           this.state.hasAuthorizedSession = true;
           this.saveState();
           return { status: 'authorized', delivery: 'telegram_app', numericCode: true };
@@ -473,6 +522,7 @@ class AndroidWebEngine {
             phoneCode: String(args.code ?? '').trim(),
           });
           this.currentUserId = String(user.id);
+          this.state.lastUserId = this.currentUserId;
           this.state.hasAuthorizedSession = true;
           this.saveState();
           return { success: true };
@@ -500,14 +550,15 @@ class AndroidWebEngine {
         const client = await this.ensureClient();
         const user = await client.checkPassword(pw);
         this.currentUserId = String(user.id);
+        this.state.lastUserId = this.currentUserId;
         this.state.hasAuthorizedSession = true;
         this.saveState();
         return { success: true };
       }
 
       case 'cmd_auth_qr_login': {
-        const apiId = Number(args.apiId);
-        const apiHash = String(args.apiHash ?? '').trim();
+        const apiId = Number(args.apiId || this.state.apiId || 0);
+        const apiHash = String(args.apiHash ?? '').trim() || (await this.loadSecret('api_hash')) || '';
         if (apiHash) await this.storeSecret('api_hash', apiHash);
         this.qrState.abort?.abort();
         const abort = new AbortController();
@@ -529,41 +580,58 @@ class AndroidWebEngine {
             }
           }, 20_000);
 
-          void client
-            .signInQr({
-              abortSignal: abort.signal,
-              onUrlUpdated: url => {
-                this.qrState.latestUrl = url;
-                if (!settledFirstUrl) {
-                  settledFirstUrl = true;
-                  window.clearTimeout(timer);
-                  resolve(url);
-                }
-              },
-              password: () =>
-                new Promise<string>(resPw => {
-                  this.qrState.needsPassword = true;
-                  this.qrState.providePassword = resPw;
-                }),
-              invalidPasswordCallback: () => {
-                const pending = this.qrState.pendingPasswordResult;
-                this.qrState.pendingPasswordResult = undefined;
-                pending?.reject(new Error('PASSWORD_HASH_INVALID'));
-              },
-            })
+          void runRobustQrSignIn(client, {
+            abortSignal: abort.signal,
+            pollIntervalMs: 1800,
+            onUrlUpdated: (url, expiresAt) => {
+              this.qrState.latestUrl = url;
+              dispatchLocalEvent('qr-auth-update', {
+                status: 'url',
+                url,
+                expiresAt: expiresAt.getTime(),
+              });
+              if (!settledFirstUrl) {
+                settledFirstUrl = true;
+                window.clearTimeout(timer);
+                resolve(url);
+              }
+            },
+            onQrScanned: () => {
+              dispatchLocalEvent('qr-auth-update', { status: 'scanned' });
+            },
+            password: () =>
+              new Promise<string>(resPw => {
+                this.qrState.needsPassword = true;
+                this.qrState.providePassword = resPw;
+                dispatchLocalEvent('qr-auth-update', { status: 'password_required' });
+              }),
+            invalidPasswordCallback: () => {
+              const pending = this.qrState.pendingPasswordResult;
+              this.qrState.pendingPasswordResult = undefined;
+              this.qrState.needsPassword = true;
+              pending?.reject(new Error('PASSWORD_HASH_INVALID'));
+            },
+          })
             .then(user => {
               this.currentUserId = String(user.id);
+              this.state.lastUserId = this.currentUserId;
               this.state.hasAuthorizedSession = true;
               this.saveState();
               this.qrState.authorized = true;
+              dispatchLocalEvent('qr-auth-update', { status: 'authorized' });
               const pending = this.qrState.pendingPasswordResult;
               this.qrState.pendingPasswordResult = undefined;
               pending?.resolve();
             })
             .catch(err => {
               window.clearTimeout(timer);
+              if (abort.signal.aborted) return;
               const normalized = err instanceof Error ? err : new Error(String(err));
               this.qrState.error = normalized.message;
+              dispatchLocalEvent('qr-auth-update', {
+                status: 'error',
+                error: normalized.message,
+              });
               const pending = this.qrState.pendingPasswordResult;
               this.qrState.pendingPasswordResult = undefined;
               pending?.reject(normalized);
@@ -573,6 +641,12 @@ class AndroidWebEngine {
               }
             });
         });
+      }
+
+      case 'cmd_auth_qr_cancel': {
+        this.qrState.abort?.abort();
+        this.qrState.abort = null;
+        return null;
       }
 
       case 'cmd_auth_qr_poll':
@@ -596,6 +670,9 @@ class AndroidWebEngine {
           this.currentApiHash = null;
         }
         this.currentUserId = null;
+        this.state.lastUserId = null;
+        this.state.cachedFilesByFolder = {};
+        this.filesCache.clear();
         this.state.hasAuthorizedSession = false;
         this.saveState();
         this.vault.lock();
@@ -1614,13 +1691,27 @@ class AndroidWebEngine {
           date: new Date().toISOString().slice(0, 10),
           up_bytes: this.state.bandwidth.uploaded,
           down_bytes: this.state.bandwidth.downloaded,
-          limit_bytes: 0,
+          limit_bytes: this.state.weeklyQuotaBytes ?? 0,
           period: 'weekly',
           uploaded_bytes: this.state.bandwidth.uploaded,
           downloaded_bytes: this.state.bandwidth.downloaded,
         };
 
-      case 'cmd_set_weekly_quota':
+      case 'cmd_set_weekly_quota': {
+        const nextLimit = Math.max(0, Number(args.limitBytes ?? 0));
+        this.state.weeklyQuotaBytes = Number.isFinite(nextLimit) ? Math.round(nextLimit) : 0;
+        this.saveState();
+        return {
+          date: new Date().toISOString().slice(0, 10),
+          up_bytes: this.state.bandwidth.uploaded,
+          down_bytes: this.state.bandwidth.downloaded,
+          limit_bytes: this.state.weeklyQuotaBytes,
+          period: 'weekly',
+          uploaded_bytes: this.state.bandwidth.uploaded,
+          downloaded_bytes: this.state.bandwidth.downloaded,
+        };
+      }
+
       case 'cmd_configure_android_transfer_recovery':
       case 'cmd_migrate_proxy_secret':
       case 'cmd_set_native_language':
