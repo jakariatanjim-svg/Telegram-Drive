@@ -22,7 +22,7 @@ jobs:
         run: |
           TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
           if [ -z "$TAG" ]; then
-            echo "No existing GitHub Release found. Run 'Windows — Release' first to create a vX.Y release." >&2
+            echo "No existing GitHub Release found. Run 'Windows — Release (Primary)' first to create a vX.Y release." >&2
             exit 1
           fi
           VERSION="${TAG#v}"
