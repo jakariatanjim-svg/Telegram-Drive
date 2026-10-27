@@ -34,7 +34,6 @@ import { ExternalDropBlocker } from './dashboard/ExternalDropBlocker';
 import type { SettingsTab } from './dashboard/SettingsModal';
 import { RenameFolderModal } from './dashboard/RenameFolderModal';
 import { RenameFileModal } from './dashboard/RenameFileModal';
-import { DesktopAdBanner } from './dashboard/DesktopAdBanner';
 import { RemoteUploadModal } from './dashboard/RemoteUploadModal';
 import { KeyboardShortcutsDialog } from './dashboard/KeyboardShortcutsDialog';
 import { DriveConceptTour } from './dashboard/DriveConceptTour';
@@ -52,10 +51,7 @@ import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useGlobalFileSearch } from '../../hooks/useGlobalFileSearch';
 import { useSettings } from '../../context/SettingsContext';
 import { useActionScope } from '../../hooks/useActionScope';
-import { useSupporter } from '../../context/SupporterContext';
 import { DEFAULT_SEARCH_FILTERS, filterAndRankFiles, type FileSearchFilters } from '../../services/fileSearch';
-import { useSupporterPrompt } from '../../hooks/useSupporterPrompt';
-import { type SupporterPromptTrigger } from '../../services/supporterVisibility';
 import { markDesktopFrontendReady, markDesktopFrontendUnready, type DesktopNavigationRequest } from '../../services/desktopLifecycle';
 import { fileQueryKey, invalidateFolderFileQueries, refreshFolderFiles, updateFileQueryData } from '../../services/fileListRefresh';
 import { getAdjacentPreview, previewFileKey, samePreviewFile as sameFile } from '../../services/previewNavigation';
@@ -67,7 +63,6 @@ const LazyMediaPlayer = lazy(() => import('./dashboard/MediaPlayer').then((modul
 const LazyPdfViewer = lazy(() => import('./dashboard/PdfViewer').then((module) => ({ default: module.PdfViewer })));
 const LazyArchiveViewerModal = lazy(() => import('./dashboard/ArchiveViewerModal').then((module) => ({ default: module.ArchiveViewerModal })));
 const LazySettingsModal = lazy(() => import('./dashboard/SettingsModal').then((module) => ({ default: module.SettingsModal })));
-const SupporterOfferDialog = lazy(() => import('../shared/SupporterOfferDialog').then(module => ({ default: module.SupporterOfferDialog })));
 const LazyHelpCenterDialog = lazy(() => import('./dashboard/HelpCenterDialog').then((module) => ({ default: module.HelpCenterDialog })));
 const LazyWorkspaceHub = lazy(() => import('../workspace/WorkspaceHub').then(module => ({ default: module.WorkspaceHub })));
 
@@ -105,7 +100,6 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
 
     const { settings, updateSetting, updateSettings, isLoaded: settingsLoaded } = useSettings();
     const captureMutationScope = useActionScope(accountId);
-    const { status: supporterStatus } = useSupporter();
 
     useEffect(() => {
         if (sessionStorage.getItem('telegram-drive-recovered-session') !== 'true') return;
@@ -126,11 +120,9 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const settingsModuleRequested = useRef(false);
     if (showSettings) settingsModuleRequested.current = true;
     const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('general');
-    const [focusSupporter, setFocusSupporter] = useState(false);
     const [transferCenterOpenRequest, setTransferCenterOpenRequest] = useState(0);
     const [showShortcuts, setShowShortcuts] = useState(false);
     const [showHelp, setShowHelp] = useState(false);
-    const [supporterOfferTrigger, setSupporterOfferTrigger] = useState<SupporterPromptTrigger | null>(null);
     const [createFolderRequest, setCreateFolderRequest] = useState(0);
     const [activeSmartView, setActiveSmartView] = useState<SmartView | null>('recents');
     const [insightSummary, setInsightSummary] = useState<{ scope: string; count: number; complete: boolean } | null>(null);
@@ -340,16 +332,6 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
     const { uploadQueue, handleManualUpload, handleFolderUpload, handleDropUpload, handleUrlUpload, clearFinished: clearUploads, cancelAll: cancelUploads, pauseAll: pauseUploads, resumeAll: resumeUploads, cancelItem: cancelUploadItem, retryItem: retryUploadItem } = useFileUpload(activeFolderId, store, undefined, undefined, accountId ?? undefined);
     const { downloadQueue, queueDownload, queueBulkDownload, clearFinished: clearDownloads, cancelAll: cancelDownloads, pauseAll: pauseDownloads, resumeAll: resumeDownloads, cancelItem: cancelDownloadItem, retryItem: retryDownloadItem } = useFileDownload(store, undefined, undefined, accountId ?? undefined);
 
-    const showSupporterOffer = useSupporterPrompt(
-        Boolean(!accountId || isLoading || isSyncing || previewFile || playingFile || pdfFile || archiveViewFile
-            || localPreview || showSettings || showMoveModal || shareFile || showRemoteUpload || showHelp
-            || showShortcuts || renameFolder || renameFileTarget || bulkShareLinks || bulkShareLoading
-            || internalDrag || selectedIds.length || workspaceKeys !== null || searchTerm
-            || uploadQueue.some(item => ['pending', 'uploading', 'downloading', 'encrypting', 'verifying'].includes(item.status))
-            || downloadQueue.some(item => ['pending', 'cooldown', 'downloading', 'decrypting', 'verifying'].includes(item.status))),
-        setSupporterOfferTrigger,
-    );
-
     const {
         handleDelete, handleBulkDelete, handleBulkDownload,
         handleMoveFiles, handleRenameFile: renameOwnedFile, handleDownloadFolder
@@ -520,7 +502,7 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
         onRename: handleKeyboardRename,
         onShowShortcuts: () => setShowShortcuts(true),
         enabled: !previewFile && !playingFile && !pdfFile && !archiveViewFile
-            && !showMoveModal && !showSettings && !showShortcuts && !showHelp && !supporterOfferTrigger && workspaceKeys === null
+            && !showMoveModal && !showSettings && !showShortcuts && !showHelp && workspaceKeys === null
             && !showRemoteUpload && !shareFile && !bulkShareLinks
             && settings.driveTourSeen
     });
@@ -1023,16 +1005,15 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <LazySettingsModal
                         ownerId={accountId}
                         isOpen={showSettings}
-                        onClose={() => { setShowSettings(false); setFocusSupporter(false); }}
+                        onClose={() => setShowSettings(false)}
                         initialTab={settingsInitialTab}
-                        focusSupporter={focusSupporter}
                     />
                 </LazyFeatureBoundary>
             )}
 
             {showShortcuts && <KeyboardShortcutsDialog onClose={() => setShowShortcuts(false)} />}
 
-            {settingsLoaded && supporterStatus.state !== 'loading' && !settings.driveTourSeen && (
+            {settingsLoaded && !settings.driveTourSeen && (
                 <DriveConceptTour
                     onFinish={() => updateSetting('driveTourSeen', true)}
                     onOpenHelp={() => { updateSetting('driveTourSeen', true); setShowHelp(true); }}
@@ -1040,24 +1021,6 @@ export function Dashboard({ onLogout }: { onLogout: () => void }) {
             )}
 
             {showHelp && <LazyFeatureBoundary><LazyHelpCenterDialog onClose={() => setShowHelp(false)} /></LazyFeatureBoundary>}
-
-            {supporterOfferTrigger && (
-                <LazyFeatureBoundary><SupporterOfferDialog
-                    trigger={supporterOfferTrigger}
-                    onClose={() => setSupporterOfferTrigger(null)}
-                    onOpenSupporter={() => { setSupporterOfferTrigger(null); setSettingsInitialTab('license'); setFocusSupporter(true); setShowSettings(true); }}
-                /></LazyFeatureBoundary>
-            )}
-
-            <DesktopAdBanner
-                suppressed={
-                    uploadQueue.some(item => ['pending', 'uploading', 'downloading', 'encrypting', 'verifying'].includes(item.status))
-                    || downloadQueue.some(item => ['pending', 'cooldown', 'downloading', 'decrypting', 'verifying'].includes(item.status))
-                    || Boolean(previewFile || playingFile || pdfFile || archiveViewFile || showSettings || showMoveModal || shareFile || showRemoteUpload || showHelp || supporterOfferTrigger || !settings.driveTourSeen)
-                }
-                onSupport={() => { setSettingsInitialTab('license'); setFocusSupporter(true); setShowSettings(true); }}
-                onManualDismiss={() => showSupporterOffer('ad_dismissed')}
-            />
 
             {shareFile && shareOwnerId && (
                 <LazyFeatureBoundary>

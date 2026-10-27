@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 /// Must match the application identifier in tauri.conf.json.
 #[cfg(target_os = "linux")]
-const BUNDLE_ID: &str = "com.cameronamer.telegramdrive";
+const BUNDLE_ID: &str = "io.github.jakariatanjim.telegramdrive";
 
 #[cfg(target_os = "linux")]
 #[derive(Deserialize)]

@@ -9,7 +9,7 @@
 use keyring::Entry;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-const KEYRING_SERVICE: &str = "com.cameronamer.telegramdrive.proxy";
+const KEYRING_SERVICE: &str = "io.github.jakariatanjim.telegramdrive.proxy";
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const PROXY_PASSWORD_ACCOUNT: &str = "proxy-password-v1";
 

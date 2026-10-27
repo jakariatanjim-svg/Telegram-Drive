@@ -214,7 +214,7 @@ export function useTelegramConnection(onLogoutParent: () => void) {
             queryClient.clear();
             clearImageMemoryCaches();
             // Legacy installs can read either store. Remove only the Telegram
-            // sign-in fields, never unrelated settings or supporter credentials.
+            // sign-in fields, never unrelated settings.
             const cleanup = await Promise.allSettled([
                 invoke('cmd_clean_cache'),
                 invoke('cmd_clear_api_hash'),

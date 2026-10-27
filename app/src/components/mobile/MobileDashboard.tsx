@@ -1,5 +1,5 @@
 import { lazy, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Folder, Download, Menu, LogOut, RefreshCw, UploadCloud, MoreVertical, Trash2, Pencil, Globe, Shield, Lock, ChevronDown, Share2, Link, Copy, Check, X, Loader2, Wifi, Activity, Zap, Eye, EyeOff, HelpCircle, ExternalLink, Pause, Play, RotateCcw, CheckCircle2, Database, Heart } from 'lucide-react';
+import { Folder, Download, Menu, LogOut, RefreshCw, UploadCloud, MoreVertical, Trash2, Pencil, Globe, Shield, Lock, ChevronDown, Share2, Link, Copy, Check, X, Loader2, Wifi, Activity, Zap, Eye, EyeOff, HelpCircle, Pause, Play, RotateCcw, CheckCircle2, Database } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -9,13 +9,10 @@ import { toast } from 'sonner';
 import { BottomNavBar } from './BottomNavBar';
 import { TouchFileList } from './TouchFileList';
 import { ThemeToggle } from '../shared/ThemeToggle';
-import AdsterraBanner from '../shared/AdsterraBanner';
 import { DriveConceptTour } from '../desktop/dashboard/DriveConceptTour';
 import { ActionPopover, ActionItem } from './ActionPopover';
 import { ShareDialog } from '../desktop/dashboard/ShareDialog';
 import { RenameFolderSheet } from './RenameFolderSheet';
-import { MobileSupporterCard } from './MobileSupporterCard';
-import { SupporterOfferDialog } from '../shared/SupporterOfferDialog';
 import { usePlatform } from '../../hooks/usePlatform';
 import { useTelegramConnection } from '../../hooks/useTelegramConnection';
 import { useFileUpload } from '../../hooks/useFileUpload';
@@ -26,7 +23,6 @@ import { LazyFeatureBoundary } from '../shared/LazyFeatureBoundary';
 import { useTheme } from '../../context/ThemeContext';
 import { TelegramFile, TelegramFolder, ShareInfo, BandwidthStats } from '../../types';
 import { useSettings } from '../../context/SettingsContext';
-import { useSupporter } from '../../context/SupporterContext';
 import { version as appVersion } from '../../../package.json';
 import { LANGUAGES } from '../../i18n/languages';
 import { useTranslation } from 'react-i18next';
@@ -35,12 +31,6 @@ import { BandwidthWidget } from '../desktop/dashboard/BandwidthWidget';
 import type { OfflineCacheStatus } from '../../types';
 import { evaluateAndroidTransferPolicy, type AndroidTransferEnvironment } from '../../services/androidTransferPolicy';
 import { effectiveVideoUploadMode } from '../../services/videoUploadMode';
-import {
-  shouldOfferNewSupporterPurchase,
-  shouldShowSupporterPrompt,
-  SUPPORTER_VALUE_MOMENT_EVENT,
-  type SupporterPromptTrigger,
-} from '../../services/supporterVisibility';
 import i18n from '../../i18n';
 
 const LazyHelpCenterDialog = lazy(() => import('../desktop/dashboard/HelpCenterDialog').then((module) => ({ default: module.HelpCenterDialog })));
@@ -86,9 +76,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const { isAndroid, isTelevision } = usePlatform();
   const { theme } = useTheme();
   const { settings, updateSetting, isLoaded: settingsLoaded } = useSettings();
-  const { status: supporterStatus } = useSupporter();
   const [showHelp, setShowHelp] = useState(false);
-  const [supporterOfferTrigger, setSupporterOfferTrigger] = useState<SupporterPromptTrigger | null>(null);
 
   // ── Android deep-link listener (https://t.me/ links) ──────────────────
   useEffect(() => {
@@ -363,14 +351,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
     updateSetting,
   ]);
 
-  // The in-app sponsor placement is TV-safe and remains available to free users.
-  // Keep it suppressed during media, previews, dialogs, and active transfers so it
-  // never covers playback controls or interrupts a bandwidth-sensitive operation.
-  const adVisible = !playingFile && !pdfFile && !previewFile && !shareFile && !bulkShareLinks
-    && !showHelp && !supporterOfferTrigger && settings.driveTourSeen
-    && !uploadQueue.some(item => ['pending', 'uploading', 'downloading', 'encrypting', 'verifying'].includes(item.status))
-    && !downloadQueue.some(item => ['pending', 'cooldown', 'downloading', 'decrypting', 'verifying'].includes(item.status));
-
   const activeUploadCount = uploadQueue.filter(item => ['pending', 'uploading', 'downloading', 'encrypting', 'verifying'].includes(item.status)).length;
   const activeDownloadCount = downloadQueue.filter(item => ['pending', 'cooldown', 'downloading', 'decrypting', 'verifying'].includes(item.status)).length;
   const pausedUploadCount = uploadQueue.filter(item => item.status === 'paused').length;
@@ -571,57 +551,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   // Folder action menu state (replaces swipe-to-reveal)
   const [folderActionMenu, setFolderActionMenu] = useState<TelegramFolder | null>(null);
   const [renameFolder, setRenameFolder] = useState<{ id: number; name: string } | null>(null);
-
-  const openMobileSupporter = useCallback(() => {
-    setSupporterOfferTrigger(null);
-    setActiveTab('settings');
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        document.getElementById('mobile-supporter-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    });
-  }, []);
-
-  const showSupporterOffer = useCallback((trigger: SupporterPromptTrigger) => {
-    if (!settingsLoaded || !settings.driveTourSeen) return;
-    if (!shouldShowSupporterPrompt(supporterStatus, settings.supporterPromptLastShownAt)) return;
-    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
-    if (playingFile || pdfFile || previewFile || shareFile || bulkShareLinks || showHelp
-      || folderActionMenu || renameFolder || isSidebarOpen) return;
-
-    updateSetting('supporterPromptLastShownAt', Date.now());
-    setSupporterOfferTrigger(trigger);
-  }, [
-    bulkShareLinks,
-    folderActionMenu,
-    isSidebarOpen,
-    pdfFile,
-    playingFile,
-    previewFile,
-    renameFolder,
-    settings.driveTourSeen,
-    settings.supporterPromptLastShownAt,
-    settingsLoaded,
-    shareFile,
-    showHelp,
-    supporterStatus,
-    updateSetting,
-  ]);
-
-  useEffect(() => {
-    if (supporterStatus.ad_free) setSupporterOfferTrigger(null);
-  }, [supporterStatus.ad_free]);
-
-  useEffect(() => {
-    const handleValueMoment = (event: Event) => {
-      const moment = (event as CustomEvent<{ moment?: SupporterPromptTrigger }>).detail?.moment;
-      if (moment === 'upload_completed' || moment === 'download_completed') {
-        showSupporterOffer(moment);
-      }
-    };
-    window.addEventListener(SUPPORTER_VALUE_MOMENT_EVENT, handleValueMoment);
-    return () => window.removeEventListener(SUPPORTER_VALUE_MOMENT_EVENT, handleValueMoment);
-  }, [showSupporterOffer]);
 
   const handleFolderVisibilityToggle = useCallback(async (folder: TelegramFolder) => {
     const isPublic = folder.is_public || !!folder.username;
@@ -840,7 +769,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
     if (!isAndroid) return;
     const androidWindow = window as typeof window & { __telegramDriveHandleAndroidBack?: () => boolean };
     androidWindow.__telegramDriveHandleAndroidBack = () => {
-      if (supporterOfferTrigger) { setSupporterOfferTrigger(null); return true; }
       if (playingFile) { setPlayingFile(null); return true; }
       if (pdfFile) { setPdfFile(null); return true; }
       if (previewFile) { setPreviewFile(null); return true; }
@@ -856,7 +784,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
       return false;
     };
     return () => { delete androidWindow.__telegramDriveHandleAndroidBack; };
-  }, [activeFolderId, activeTab, bulkShareLinks, folderActionMenu, isAndroid, isSidebarOpen, pdfFile, playingFile, previewFile, renameFolder, selectedIds.length, setActiveFolderId, shareFile, showHelp, supporterOfferTrigger]);
+  }, [activeFolderId, activeTab, bulkShareLinks, folderActionMenu, isAndroid, isSidebarOpen, pdfFile, playingFile, previewFile, renameFolder, selectedIds.length, setActiveFolderId, shareFile, showHelp]);
 
   return (
     <div className={`absolute inset-0 flex flex-col bg-telegram-bg text-telegram-text overflow-hidden select-none font-sans ${isTelevision ? 'tv-shell' : ''}`}>
@@ -1023,22 +951,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
 
         {activeTab === 'settings' && (
           <div className="space-y-4">
-            {shouldOfferNewSupporterPurchase(supporterStatus) && !supporterStatus.checkout_pending && (
-              <button
-                type="button"
-                onClick={openMobileSupporter}
-                className="flex w-full items-center gap-3 rounded-2xl border border-telegram-primary/30 bg-gradient-to-r from-telegram-primary/15 to-telegram-hover/20 p-4 text-left shadow-sm transition-transform active:scale-[0.99]"
-              >
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-telegram-primary/20 text-telegram-primary">
-                  <Heart className="h-5 w-5" aria-hidden="true" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-xs font-bold text-telegram-text">{t('supporter_license.title')}</span>
-                  <span className="mt-0.5 block text-[10px] leading-4 text-telegram-subtext">{t('supporter_license.mobile_description')}</span>
-                </span>
-                <span className="text-lg text-telegram-primary" aria-hidden="true">›</span>
-              </button>
-            )}
             <div className="p-4 rounded-2xl bg-telegram-hover/20 border border-telegram-border/30 space-y-4">
               <h3 className="text-sm font-bold text-telegram-primary tracking-wide uppercase text-[10px]">{t('common.preferences')}</h3>
               <div className="flex items-center justify-between py-2 border-b border-telegram-border/20">
@@ -1430,29 +1342,19 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
             <div className="space-y-4 rounded-2xl border border-telegram-border/30 bg-telegram-hover/20 p-4">
               <h3 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-telegram-primary">
                 <Shield className="h-3 w-3" aria-hidden="true" />
-                Privacy &amp; support
+                Privacy &amp; help
               </h3>
-              <div id="mobile-supporter-card" className="scroll-mt-24">
-                <MobileSupporterCard />
-              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => setShowHelp(true)}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-telegram-border/40 bg-telegram-bg/50 px-3 py-2.5 text-[11px] font-semibold text-telegram-text"
+                  className="col-span-2 flex items-center justify-center gap-1.5 rounded-xl border border-telegram-border/40 bg-telegram-bg/50 px-3 py-2.5 text-[11px] font-semibold text-telegram-text"
                 >
                   <HelpCircle className="h-3.5 w-3.5 text-telegram-primary" aria-hidden="true" />
                   {i18n.t('ui_copy.help_faq')}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => openUrl('https://github.com/caamer20/Telegram-Drive/blob/main/PRIVACY.md')}
-                  className="flex items-center justify-center gap-1.5 rounded-xl border border-telegram-border/40 bg-telegram-bg/50 px-3 py-2.5 text-[11px] font-semibold text-telegram-text"
-                >
-                  Privacy policy <ExternalLink className="h-3 w-3 text-telegram-primary" aria-hidden="true" />
-                </button>
               </div>
-              <p className="text-[10px] leading-relaxed text-telegram-subtext">Credentials and settings stay on this device. File transfers go directly between this app and Telegram; sponsor content is provided by the named advertising service.</p>
+              <p className="text-[10px] leading-relaxed text-telegram-subtext">Credentials and settings stay on this device. File transfers go directly between this app and Telegram.</p>
             </div>
 
             <div className="p-4 rounded-2xl bg-telegram-hover/20 border border-telegram-border/30 space-y-4">
@@ -1467,24 +1369,14 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                 <div className="w-10 h-px bg-telegram-border" />
 
                 <div className="text-center space-y-2.5">
-                  <p className="text-xs font-semibold text-telegram-text">Cameron Amer</p>
-
                   <button
-                    onClick={(e) => { e.preventDefault(); openUrl('https://www.cameronamer.com'); }}
-                    className="flex items-center justify-center gap-1.5 text-[11px] text-telegram-primary hover:text-telegram-primary/80 transition-colors cursor-pointer"
-                  >
-                    <Globe className="w-3 h-3" />
-                    www.cameronamer.com
-                  </button>
-
-                  <button
-                    onClick={(e) => { e.preventDefault(); openUrl('https://github.com/caamer20/telegram-drive'); }}
+                    onClick={(e) => { e.preventDefault(); openUrl('https://github.com/jakariatanjim-svg/Telegram-Drive'); }}
                     className="flex items-center justify-center gap-1.5 text-[11px] text-telegram-primary hover:text-telegram-primary/80 transition-colors cursor-pointer"
                   >
                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
                     </svg>
-                    github.com/caamer20/telegram-drive
+                    github.com/jakariatanjim-svg/Telegram-Drive
                   </button>
                 </div>
 
@@ -1627,16 +1519,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
       {/* Floating Bottom Nav Bar */}
       <BottomNavBar activeTab={activeTab} setActiveTab={setActiveTab} isAndroid={isAndroid} isTelevision={isTelevision} />
 
-      {/* Adsterra Banner (Android only) — z-[60] keeps it above the BottomNavBar (z-50).
-           Positioned at bottom-[144px] to sit cleanly above the nav bar (~60px tall, at bottom-20=80px). */}
-      <div className={`fixed bottom-[144px] left-0 right-0 z-[60] ${isTelevision ? 'tv-sponsor-placement' : ''}`}>
-        <AdsterraBanner
-          visible={adVisible}
-          onSupport={openMobileSupporter}
-          onManualDismiss={() => showSupporterOffer('ad_dismissed')}
-        />
-      </div>
-
       {/* Previews Overlays (Media, PDF & Images) */}
       {playingFile && (
         <LazyFeatureBoundary>
@@ -1693,15 +1575,6 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
       )}
 
       {showHelp && <LazyFeatureBoundary><LazyHelpCenterDialog onClose={() => setShowHelp(false)} /></LazyFeatureBoundary>}
-
-      {supporterOfferTrigger && (
-        <SupporterOfferDialog
-          trigger={supporterOfferTrigger}
-          presentation={isTelevision ? 'tv-dialog' : 'bottom-sheet'}
-          onClose={() => setSupporterOfferTrigger(null)}
-          onOpenSupporter={openMobileSupporter}
-        />
-      )}
 
       {/* Bulk Share Results Modal */}
       {bulkShareLinks && (

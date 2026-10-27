@@ -15,7 +15,6 @@ import { useConfirm } from '../context/ConfirmContext';
 import { formatBytes } from '../utils';
 import { triggerHaptic } from '../services/feedback';
 import { isTransientNetworkError, restoreDownloadQueue, serializeDownloadQueue } from '../services/transferQueuePolicy';
-import { announceSupporterValueMoment } from '../services/supporterVisibility';
 import { userFacingError } from '../services/userFacingError';
 import { evaluateAndroidTransferPolicy, type AndroidTransferEnvironment } from '../services/androidTransferPolicy';
 import {
@@ -146,7 +145,6 @@ export function useFileDownload(
                     toast.info(t('downloadCollision.skipped'));
                 } else if (job.status === 'completed') {
                     triggerHaptic('success');
-                    announceSupporterValueMoment('download_completed');
                     toast.success(i18n.t('transfer_copy.downloaded',{name:job.filename}), job.savePath ? {
                         action: {
                             label: i18n.t('common.show_in_folder'),
@@ -540,7 +538,6 @@ export function useFileDownload(
             } else {
                 setDownloadQueue(q => q.map(i => i.id === item.id ? { ...i, status: 'success', progress: 100 } : i));
                 triggerHaptic('success');
-                announceSupporterValueMoment('download_completed');
                 toast.success(i18n.t('transfer_copy.downloaded',{name:item.filename}), !isAndroidPlatform && savePath ? {
                     action: {
                         label: i18n.t('common.show_in_folder'),

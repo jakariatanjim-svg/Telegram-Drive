@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, Sun, Moon, ExternalLink, X, Heart } from "lucide-react";
+import { ShieldCheck, Sun, Moon, ExternalLink, X } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
 import { useTheme } from '../../context/ThemeContext';
 import { open } from '@tauri-apps/plugin-shell';
@@ -70,7 +70,6 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const [error, setError] = useState<string | null>(null);
     const [floodWait, setFloodWait] = useState<number | null>(null);
     const [showHelp, setShowHelp] = useState(false);
-    const [showDonate, setShowDonate] = useState(false);
     const isMobile = typeof navigator !== 'undefined' && /android|iphone|ipad|ipod/i.test(navigator.userAgent.toLowerCase());
     const [loginMethod, setLoginMethod] = useState<'phone' | 'qr'>(() => isMobile ? 'phone' : 'qr');
     const [codeDelivery, setCodeDelivery] = useState<CodeRequestResult | null>(null);
@@ -516,15 +515,6 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                     </motion.div>
                 )}
 
-                <div className="mt-6 border-t border-app-border-subtle pt-3 text-center">
-                    <button
-                        onClick={() => setShowDonate(true)}
-                        className="quiet-control auth-secondary-action mx-auto px-2"
-                    >
-                        <Heart className="w-3.5 h-3.5 text-red-500/80" />
-                        {i18n.t("auth.donate")}
-                    </button>
-                </div>
             </motion.div>
 
 
@@ -602,52 +592,6 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                     <ExternalLink className="w-4 h-4" />
                                     {t('auth_copy.open_portal')}
                                 </button>
-                            </div>
-                        </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
-            <AnimatePresence>
-                {showDonate && (
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-50 flex items-center justify-center bg-app-overlay p-4 backdrop-blur-sm"
-                        onClick={() => setShowDonate(false)}
-                    >
-                        <motion.div
-                            initial={{ scale: 0.95, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            exit={{ scale: 0.95, opacity: 0 }}
-                            className="quiet-raised w-full max-w-sm p-5"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <div className="relative mb-5 flex items-center justify-center">
-                                <h2 className="text-center text-app-title font-semibold text-app-text">
-                                    {t('supporter_license.auth_title')}
-                                </h2>
-                                <button onClick={() => setShowDonate(false)} className="quiet-control absolute end-0 flex h-8 w-8 items-center justify-center text-app-text-secondary hover:text-app-text" aria-label={t('supporter_license.auth_close')}>
-                                    <X className="h-4 w-4" />
-                                </button>
-                            </div>
-
-                            <div className="space-y-4 text-center">
-                                <p className="mb-5 text-ui leading-relaxed text-app-text-secondary">
-                                    {t('supporter_license.auth_description')}
-                                </p>
-
-                                <div className="space-y-4">
-                                    <a href="#" onClick={(e) => { e.preventDefault(); open('https://link.trustwallet.com/send?address=ltc1q6wkr5ac4u0pxx4hx7xgwn0gsaku25ws0df73rp&asset=c2'); }} className="block hover:opacity-80 transition-opacity">
-                                        <img src="/donation/ltc.svg" alt={t('supporter_license.donate_ltc')} className="mx-auto h-[28px]" />
-                                    </a>
-
-                                    <a href="#" onClick={(e) => { e.preventDefault(); open('https://link.trustwallet.com/send?asset=c0&address=bc1q5pt7m2fk6w0dzsnf6vvd5k6nw5k44785286ujy'); }} className="block hover:opacity-80 transition-opacity">
-                                        <img src="/donation/btc.svg" alt={t('supporter_license.donate_btc')} className="mx-auto h-[28px]" />
-                                    </a>
-                                    <p className="text-metadata leading-5 text-app-text-tertiary">{t('supporter_license.auth_crypto_note')}</p>
-                                </div>
                             </div>
                         </motion.div>
                     </motion.div>

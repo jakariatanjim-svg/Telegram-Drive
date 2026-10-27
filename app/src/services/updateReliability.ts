@@ -1,5 +1,3 @@
-import type { Update } from '@tauri-apps/plugin-updater';
-
 const PENDING_UPDATE_KEY = 'telegram-drive.pending-update';
 const LAST_SEEN_VERSION_KEY = 'telegram-drive.last-seen-version';
 
@@ -16,7 +14,7 @@ interface PendingUpdate {
     body?: string;
 }
 
-export function writePendingUpdate(update: Update): void {
+export function writePendingUpdate(update: { version: string; body?: string }): void {
     const pending: PendingUpdate = {
         toVersion: update.version,
         body: update.body,
@@ -24,7 +22,7 @@ export function writePendingUpdate(update: Update): void {
     try {
         localStorage.setItem(PENDING_UPDATE_KEY, JSON.stringify(pending));
     } catch {
-        // Optional release notes must never prevent a verified update installing.
+        // Optional release notes must never prevent an update installing.
     }
 }
 

@@ -5,7 +5,7 @@ export interface InstallationInfo {
     packageManager: 'pacman' | null;
 }
 
-export const RELEASES_URL = 'https://github.com/caamer20/Telegram-Drive/releases/latest';
+export const RELEASES_URL = 'https://github.com/jakariatanjim-svg/Telegram-Drive/releases/latest';
 
 const SELF_MANAGED_INSTALLATION: InstallationInfo = {
     managedByPackageManager: false,

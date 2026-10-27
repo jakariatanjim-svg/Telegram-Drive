@@ -24,11 +24,7 @@ export interface Settings {
   videoUploadMode: VideoUploadMode;
   videoFilenameCaption: boolean;
   language: LanguagePreference;
-  crashReportingEnabled: boolean;
-  crashReportingConsentSeen: boolean;
   telegramSettingsSyncEnabled: boolean;
-  supporterMode: boolean;
-  supporterPromptLastShownAt: number;
   driveTourSeen: boolean;
   vaultRecoveryDrillCompleted: boolean;
   /** Vault the completed drill was run against; empty for drills recorded before 4.0. */

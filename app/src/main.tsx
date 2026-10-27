@@ -5,17 +5,14 @@ import i18n,{ensureLanguageResource,i18nInitialized} from './i18n';
 import bootstrapCopy from 'virtual:telegram-drive-bootstrap-copy';
 import {resolveLanguagePreference} from './i18n/resolveLanguage';
 import {load} from '@tauri-apps/plugin-store';
-import { reportCrash } from './services/crashTelemetry';
 
 window.onerror = function (message, source, lineno, colno, error) {
   console.error("Global JS Error:", message, "at", source, lineno + ":" + colno, error?.stack || error);
-  reportCrash(error || new Error(String(message)), 'window');
   return false;
 };
 
 window.addEventListener("unhandledrejection", function (event) {
   console.error("Unhandled Promise Rejection:", event.reason, event.reason?.stack || event.reason);
-  reportCrash(event.reason, 'promise');
 });
 
 const container=document.getElementById('root') as HTMLElement;

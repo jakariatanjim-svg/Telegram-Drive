@@ -3,18 +3,11 @@
   "plugins": {
     "shell": {
       "open": "(?:https?://[^\\s]+|mailto:[^\\s]+)"
-    },
-    "updater": {
-      "endpoints": [
-        "https://github.com/caamer20/Telegram-Drive/releases/latest/download/latest.json",
-        "https://telegram-drive.com/updates/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwN0I3MDBFMzQ5Nzk2M0MKUldROGxwYzBEbkI3VUwwOE13MURPOUtGWWVNTGNkaFZ3WEg0MHFoR0JMSlVjNXBwYksxWEhNMkoK"
     }
   },
   "productName": "Telegram Drive",
   "version": "4.1.2",
-  "identifier": "com.cameronamer.telegramdrive",
+  "identifier": "io.github.jakariatanjim.telegramdrive",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -52,7 +45,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

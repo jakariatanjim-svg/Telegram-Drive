@@ -52,7 +52,6 @@ pub struct TelegramState {
 pub mod api_settings;
 pub mod archive;
 pub mod auth;
-pub mod crash_reporting;
 pub mod download_destination;
 pub mod file_activity;
 pub mod file_inventory;
@@ -66,8 +65,6 @@ pub mod sharing;
 pub mod startup;
 pub mod storage_insights;
 pub mod streaming;
-#[cfg(not(target_os = "ios"))]
-pub mod supporter;
 pub mod sync;
 pub mod utils;
 pub mod video_metadata;
@@ -76,7 +73,6 @@ pub mod webdav_settings;
 pub use api_settings::*;
 pub use archive::*;
 pub use auth::*;
-pub use crash_reporting::*;
 pub use file_activity::*;
 pub use file_inventory::*;
 pub use folder_groups::*;
@@ -89,8 +85,6 @@ pub use sharing::*;
 pub use startup::*;
 pub use storage_insights::*;
 pub use streaming::*;
-#[cfg(not(target_os = "ios"))]
-pub use supporter::*;
 pub use sync::*;
 pub use utils::*;
 pub use video_metadata::*;

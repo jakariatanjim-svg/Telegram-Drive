@@ -1,10 +1,9 @@
 import i18n from '../../../i18n';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Monitor, Loader2, Languages, Play, Palette, Tag, Search, Bug, Database, FolderSync } from 'lucide-react';
+import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Monitor, Loader2, Languages, Play, Palette, Tag, Search, Database, FolderSync } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { useSupporter } from '../../../context/SupporterContext';
 import { useSettings } from '../../../context/SettingsContext';
 import { useConfirm } from '../../../context/ConfirmContext';
 import { useTranslation } from 'react-i18next';
@@ -17,7 +16,7 @@ import { AccessTransparencyDialog, type LocalAccessService } from '../../shared/
 import { getDetailedTranscodeCache, transcodeCacheErrorMessage } from '../../../services/transcodeCacheClient';
 import { formatBytes } from '../../../utils';
 import { SettingsRow, SettingsStepper, SettingsToggle } from './settings/SettingsControls';
-import { AboutSettingsTab, AdvancedSettingsTab, EncryptionSettingsTab, GeneralSettingsTab, LicenseSettingsTab, PrivacySettingsTab, ProxySettingsTab, SharingSettingsTab, ThemeSettingsTab, VpnSettingsTab, WebDavSettingsTab } from './settings/SettingsTabs';
+import { AboutSettingsTab, AdvancedSettingsTab, EncryptionSettingsTab, GeneralSettingsTab, PrivacySettingsTab, ProxySettingsTab, SharingSettingsTab, ThemeSettingsTab, VpnSettingsTab, WebDavSettingsTab } from './settings/SettingsTabs';
 import { FfmpegInstallNotice } from '../../shared/FfmpegInstallNotice';
 import { SyncSettingsPanel } from '../sync/SyncSettingsPanel';
 import { DesktopBehaviorSettings } from './settings/DesktopBehaviorSettings';
@@ -32,7 +31,6 @@ interface SettingsModalProps {
     isOpen: boolean;
     onClose: () => void;
     initialTab?: SettingsTab;
-    focusSupporter?: boolean;
 }
 
 interface ApiSettings {
@@ -58,20 +56,17 @@ interface WebDavTokenResponse {
     url: string;
 }
 
-export type SettingsTab = 'general' | 'privacy' | 'license' | 'advanced' | 'webdav' | 'themes' | 'proxy' | 'vpn' | 'encryption' | 'sharing' | 'sync' | 'about';
+export type SettingsTab = 'general' | 'privacy' | 'advanced' | 'webdav' | 'themes' | 'proxy' | 'vpn' | 'encryption' | 'sharing' | 'sync' | 'about';
 
 export function SettingsModal(props: SettingsModalProps) {
     return <OwnedSettingsModal key={props.ownerId ?? 'signed-out'} {...props} />;
 }
 
-function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general', focusSupporter = false }: SettingsModalProps) {
+function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }: SettingsModalProps) {
     const { settings, updateSetting, updateSettings, resetSettings, isLoaded, persistenceStatus } = useSettings();
     const { confirm } = useConfirm();
     const { t } = useTranslation();
-    const { status: supporterStatus } = useSupporter();
-    const tabLabel = (tab: SettingsTab) => tab === 'license'
-        ? t(supporterStatus.ad_free ? 'supporter_license.purchased_title' : 'supporter_license.nav_title')
-        : t(`settings.tab_${tab}`);
+    const tabLabel = (tab: SettingsTab) => t(`settings.tab_${tab}`);
     const [clearing, setClearing] = useState(false);
 
     // Transcode cache state
@@ -97,25 +92,6 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general', 
             setAccessTransparency(null);
         }
     }, [initialTab, isOpen]);
-    useEffect(() => {
-        const container = modalRef.current;
-        if (!isOpen || activeTab !== 'license' || !focusSupporter || !container) return;
-        let frame = 0;
-        const focusSection = () => {
-            const section = container.querySelector<HTMLElement>('#desktop-supporter-section');
-            if (!section) return;
-            observer.disconnect();
-            frame = window.requestAnimationFrame(() => {
-                section.scrollIntoView({ block: 'start' });
-                section.focus({ preventScroll: true });
-            });
-        };
-        // The license section is loaded on demand, so it may mount after the tab.
-        const observer = new MutationObserver(focusSection);
-        observer.observe(container, { childList: true, subtree: true });
-        focusSection();
-        return () => { observer.disconnect(); window.cancelAnimationFrame(frame); };
-    }, [activeTab, focusSupporter, isOpen]);
     const [latencyMs, setLatencyMs] = useState<number | null>(null);
     const [vpnDetected, setVpnDetected] = useState<boolean | null>(null);
     const [proxyStatus, setProxyStatus] = useState<{ reachable: boolean; latency_ms: number } | null>(null);
@@ -728,10 +704,10 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general', 
                             </div>
                             {([
                                 [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates'], ['themes', Palette, 'Appearance colors themes']] as const],
-                                [t('ui_copy.nav_security'), [['privacy', Bug, 'Privacy telemetry crash reports consent'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
+                                [t('ui_copy.nav_security'), [['privacy', Database, 'Privacy local data settings sync'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
                                 [t('ui_copy.nav_connections'), [['sync', FolderSync, 'Folder sync local directories Telegram channels'], ['sharing', Link, 'Sharing links local server']] as const],
                                 [t('settings.tab_advanced'), [['advanced', Gauge, 'REST API proxy VPN WebDAV network integration Finder token port']] as const],
-                                [t('ui_copy.nav_support'), [['license', Key, 'Supporter lifetime license ad-free ads $5 PayPal recovery purchase'], ['about', Info, 'About diagnostics version updates']] as const],
+                                [t('ui_copy.nav_support'), [['about', Info, 'About diagnostics version updates']] as const],
                             ] as const).map(([group, items]) => {
                                 const visibleItems = items.filter(([key, , keywords]) => `${key} ${keywords} ${tabLabel(key)}`.toLowerCase().includes(settingsSearch.trim().toLowerCase()));
                                 if (visibleItems.length === 0) return null;
@@ -1279,12 +1255,8 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general', 
                                     </GeneralSettingsTab>
                                 )}
 
-                                {activeTab === 'license' && <LicenseSettingsTab />}
-
                                 {activeTab === 'privacy' && (
                                     <PrivacySettingsTab
-                                        crashReportingEnabled={settings.crashReportingEnabled}
-                                        onCrashReportingChange={() => updateSettings({ crashReportingEnabled: !settings.crashReportingEnabled, crashReportingConsentSeen: true })}
                                         settings={settings}
                                         onSettingsChange={updateSettings}
                                         onSettingsSyncEnabledChange={enabled => updateSetting('telegramSettingsSyncEnabled', enabled)}
