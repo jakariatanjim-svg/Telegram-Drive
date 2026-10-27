@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion, AnimatePresence } from "framer-motion";
-import { ShieldCheck, Sun, Moon, ExternalLink, X } from "lucide-react";
+import { Sun, Moon, ExternalLink, X } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
 import { useTheme } from '../../context/ThemeContext';
 import { open } from '@tauri-apps/plugin-shell';
@@ -37,26 +37,6 @@ function AuthThemeToggle() {
 }
 export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const { t } = useTranslation();
-    const isBrowser = typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window);
-
-    if (isBrowser) {
-        return (
-            <div className="auth-gradient flex h-full items-center justify-center p-6 text-center text-app-text">
-              <div className="quiet-raised max-w-md p-6">
-                <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-container bg-app-danger/10">
-                    <ShieldCheck className="h-6 w-6 text-app-danger" />
-                </div>
-                <h1 className="text-app-title font-semibold text-app-text">{t('auth.desktop_required')}</h1>
-                <p className="mx-auto mt-2 max-w-sm text-ui leading-relaxed text-app-text-secondary">
-                    {t('auth.desktop_required_desc')}
-                </p>
-                <div className="mt-5 rounded-control border border-app-border bg-app-surface-sunken/40 p-3 text-metadata text-app-text-secondary">
-                    {t('auth.open_window_prompt')}
-                </div>
-              </div>
-            </div>
-        )
-    }
 
     const [step, setStep] = useState<AuthStep>("setup");
     const [loading, setLoading] = useState(false);

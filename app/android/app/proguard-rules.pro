@@ -19,3 +19,11 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+-keep class com.telegramdrive.app.** { *; }
+-keep class com.getcapacitor.** { *; }
+-keepattributes *Annotation*,JavascriptInterface
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+    @com.getcapacitor.PluginMethod <methods>;
+}

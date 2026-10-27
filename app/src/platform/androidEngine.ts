@@ -268,10 +268,7 @@ class AndroidWebEngine {
 
   private async getOwnerId(): Promise<string> {
     if (this.currentUserId) return this.currentUserId;
-    const client = await this.ensureClient();
-    const me = await client.getMe();
-    this.currentUserId = String(me.id);
-    return this.currentUserId;
+    throw new Error('NOT_CONNECTED');
   }
 
   private async fetchMessage(folderId: number | null, messageId: number): Promise<Message> {
@@ -313,23 +310,35 @@ class AndroidWebEngine {
     return merged;
   }
 
-  private async listFiles(folderId: number | null): Promise<MappedTelegramFile[]> {
+  private async listFiles(
+    folderId: number | null,
+    onChunk?: (chunk: MappedTelegramFile[]) => void,
+  ): Promise<MappedTelegramFile[]> {
     const client = await this.ensureClient();
     const peer = folderIdToPeer(folderId);
     const out: MappedTelegramFile[] = [];
+    const vaultUnlocked = this.vault.getStatus().is_unlocked;
     let offset: { id: number; date: number } | undefined;
 
     for (let page = 0; page < 4; page++) {
       const history = await client.getHistory(peer, { limit: 100, offset });
       if (history.length === 0) break;
+      const pageFiles: MappedTelegramFile[] = [];
       for (const msg of history) {
         const key = fileCompositeKey(folderId, msg.id);
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.state.fileRenames[key],
           favorite: this.state.favorites.includes(key),
           encryptedRecord: this.vault.getEncryptedFileRecord(key),
+          vaultUnlocked,
         });
-        if (mapped) out.push(mapped);
+        if (mapped) {
+          out.push(mapped);
+          pageFiles.push(mapped);
+        }
+      }
+      if (pageFiles.length > 0 && onChunk) {
+        onChunk(pageFiles);
       }
       if (!history.next) break;
       offset = history.next;
@@ -560,6 +569,7 @@ class AndroidWebEngine {
             const total = list.reduce((s, item) => s + (item.size || 0), 0);
             return {
               ...f,
+              display_order: f.sort_order,
               file_count: list.length,
               total_size: total,
               total_size_str: formatByteSize(total),
@@ -627,15 +637,19 @@ class AndroidWebEngine {
         return null;
       }
 
-      case 'cmd_set_folder_group': {
-        const f = this.state.folders.find(i => i.id === Number(args.folderId));
+      case 'cmd_set_folder_group':
+      case 'cmd_assign_folder_to_group': {
+        const fid = Number(args.folderId ?? args.channelId);
+        const f = this.state.folders.find(i => i.id === fid);
         if (f) f.group_id = args.groupId === null || args.groupId === undefined ? null : Number(args.groupId);
         this.saveState();
         return null;
       }
 
       case 'cmd_get_groups':
-        return [...this.state.groups].sort((a, b) => a.sort_order - b.sort_order);
+        return [...this.state.groups]
+          .sort((a, b) => a.sort_order - b.sort_order)
+          .map(g => ({ ...g, display_order: g.sort_order }));
 
       case 'cmd_create_group': {
         const id = Date.now();
@@ -647,6 +661,16 @@ class AndroidWebEngine {
         });
         this.saveState();
         return id;
+      }
+
+      case 'cmd_update_group': {
+        const g = this.state.groups.find(i => i.id === Number(args.groupId));
+        if (g) {
+          if (args.name !== undefined) g.name = String(args.name);
+          if (args.colorHex !== undefined) g.color_hex = String(args.colorHex);
+        }
+        this.saveState();
+        return null;
       }
 
       case 'cmd_rename_group': {
@@ -673,15 +697,73 @@ class AndroidWebEngine {
       case 'cmd_delete_group': {
         const gid = Number(args.groupId);
         this.state.groups = this.state.groups.filter(i => i.id !== gid);
+        for (const f of this.state.folders) {
+          if (f.group_id === gid) f.group_id = null;
+        }
         this.saveState();
         return null;
       }
 
       // ── Files, Thumbnails, Previews & Transfers ────────────────────
-      case 'cmd_get_files':
-        return await this.listFiles(
-          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId),
-        );
+      case 'cmd_get_cached_files': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        return this.filesCache.get(String(folderId ?? 'saved')) ?? [];
+      }
+
+      case 'cmd_get_files': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const ownerId =
+          typeof args.ownerId === 'string' && args.ownerId
+            ? args.ownerId
+            : (this.currentUserId ?? '');
+        const requestId = typeof args.requestId === 'string' ? args.requestId : '';
+        const files = await this.listFiles(folderId, chunk => {
+          dispatchLocalEvent('folder-load-chunk', {
+            ownerId,
+            folderId,
+            requestId,
+            files: chunk,
+          });
+        });
+        return {
+          ownerId,
+          folderId,
+          requestId,
+          files,
+          complete: true,
+        };
+      }
+
+      case 'cmd_get_offline_files':
+      case 'cmd_get_file_activity':
+        return [];
+
+      case 'cmd_touch_file_inventory':
+      case 'cmd_record_file_opened':
+      case 'cmd_set_file_activity_flag':
+        return null;
+
+      case 'cmd_get_storage_insight': {
+        const ownerId = this.currentUserId ?? '';
+        const allFiles = ownerId ? this.collectWorkspaceFiles(ownerId) : [];
+        const bySizeKey = new Map<string, number>();
+        for (const f of allFiles) {
+          const k = `${f.name}:${f.size}`;
+          bySizeKey.set(k, (bySizeKey.get(k) ?? 0) + 1);
+        }
+        let duplicateGroups = 0;
+        for (const count of bySizeKey.values()) {
+          if (count > 1) duplicateGroups++;
+        }
+        return {
+          files: allFiles,
+          complete: true,
+          scanned_count: allFiles.length,
+          duplicate_groups: duplicateGroups,
+        };
+      }
 
       case 'cmd_search_files': {
         const q = String(args.query ?? '').toLowerCase();
@@ -777,6 +859,7 @@ class AndroidWebEngine {
         }
       }
 
+      case 'cmd_get_display_preview':
       case 'cmd_get_preview': {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
@@ -789,8 +872,17 @@ class AndroidWebEngine {
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.state.fileRenames[key],
           encryptedRecord: this.vault.getEncryptedFileRecord(key),
+          vaultUnlocked: this.vault.getStatus().is_unlocked,
         });
-        const rawBytes = await this.downloadRawBytes(folderId, messageId);
+        const rawBytes = await this.downloadRawBytes(folderId, messageId, (done, total) => {
+          dispatchLocalEvent('preview-progress', {
+            folder_id: folderId,
+            message_id: messageId,
+            downloaded_bytes: done,
+            total_bytes: total,
+            percent: total > 0 ? Math.min(99, Math.round((done / total) * 99)) : 0,
+          });
+        });
         const plain = VaultRuntime.hasEncryptedMagic(rawBytes)
           ? this.vault.decryptBuffer(rawBytes, {
               promptToken: typeof args.promptToken === 'number' ? args.promptToken : undefined,
@@ -802,6 +894,34 @@ class AndroidWebEngine {
         return url;
       }
 
+      case 'cmd_set_preview_pinned': {
+        const key = fileCompositeKey(
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId),
+          Number(args.messageId),
+        );
+        if (args.pinned) {
+          if (!this.state.pinnedPreviews.includes(key)) this.state.pinnedPreviews.push(key);
+        } else {
+          this.state.pinnedPreviews = this.state.pinnedPreviews.filter(k => k !== key);
+        }
+        this.saveState();
+        return null;
+      }
+
+      case 'cmd_delete_preview_for_message': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const cacheKey = `prev:${folderId ?? 'saved'}:${messageId}`;
+        const url = this.blobUrlCache.get(cacheKey);
+        if (url) {
+          URL.revokeObjectURL(url);
+          this.blobUrlCache.delete(cacheKey);
+        }
+        return null;
+      }
+
+      case 'cmd_list_archive_contents':
       case 'cmd_list_archive_entries': {
         const previewUrl = String(
           await this.invoke('cmd_get_preview', {
@@ -1027,18 +1147,23 @@ class AndroidWebEngine {
       case 'cmd_get_encryption_settings':
         return this.vault.getSettings();
       case 'cmd_update_encryption_settings': {
-        const res = this.vault.updateSettings((args.settings as Partial<VaultStateSettings>) ?? {});
+        const res = this.vault.updateSettings((args.settings as Record<string, unknown>) ?? {});
         this.saveState();
         return res;
       }
       case 'cmd_create_vault':
         this.vault.createVault(String(args.passphrase ?? ''));
         this.saveState();
+        dispatchLocalEvent('vault-unlocked', {});
         return null;
-      case 'cmd_unlock_vault':
-        return this.vault.unlock(String(args.passphrase ?? ''));
+      case 'cmd_unlock_vault': {
+        const sid = this.vault.unlock(String(args.passphrase ?? ''));
+        dispatchLocalEvent('vault-unlocked', {});
+        return sid;
+      }
       case 'cmd_lock_vault':
         this.vault.lock();
+        dispatchLocalEvent('vault-locked', {});
         return null;
       case 'cmd_record_vault_activity':
         this.vault.recordActivity();
@@ -1049,15 +1174,24 @@ class AndroidWebEngine {
         return null;
       case 'cmd_generate_recovery_key':
         return this.vault.generateRecoveryKey();
-      case 'cmd_export_vault_recovery':
+      case 'cmd_export_vault_recovery': {
+        if (args.recoveryPassphrase !== undefined) {
+          return this.vault.exportVaultRecovery(String(args.recoveryPassphrase ?? ''));
+        }
         return this.vault.exportVaultRecovery(String(args.currentPassphrase ?? ''), String(args.recoveryKey ?? ''));
+      }
       case 'cmd_verify_vault_recovery':
-        return this.vault.verifyVaultRecovery(String(args.recoveryJson ?? ''), String(args.recoveryKey ?? ''));
+        return this.vault.verifyVaultRecovery(
+          String(args.bundleBase64 ?? args.recoveryJson ?? ''),
+          String(args.recoveryPassphrase ?? args.recoveryKey ?? ''),
+        );
       case 'cmd_import_vault_recovery':
         this.vault.importVaultRecovery(
-          String(args.recoveryJson ?? ''),
-          String(args.recoveryKey ?? ''),
-          String(args.newPassphrase ?? ''),
+          String(args.bundleBase64 ?? args.recoveryJson ?? ''),
+          String(args.recoveryPassphrase ?? args.recoveryKey ?? ''),
+          args.vaultPassphrase !== undefined || args.newPassphrase !== undefined
+            ? String(args.vaultPassphrase ?? args.newPassphrase ?? '')
+            : undefined,
         );
         this.saveState();
         return null;
@@ -1204,15 +1338,23 @@ class AndroidWebEngine {
         if (isAndroidNative()) {
           return await TelegramDriveNative.getTransferEnvironment();
         }
+        const online = navigator.onLine !== false;
+        const avail = 16 * 1024 * 1024 * 1024;
         return {
-          network_connected: navigator.onLine !== false,
-          wifi_connected: true,
-          roaming: false,
+          connected: online,
           metered: false,
-          battery_percent: 100,
+          roaming: false,
           charging: true,
+          batteryLow: false,
+          storageLow: false,
+          freeBytes: avail,
+          powerSaveMode: false,
+          backgroundRestricted: false,
+          network_connected: online,
+          wifi_connected: true,
+          battery_percent: 100,
           power_save_mode: false,
-          available_storage_bytes: 16 * 1024 * 1024 * 1024,
+          available_storage_bytes: avail,
           notification_permission: 'granted',
           recovery_supported: true,
         };
@@ -1278,10 +1420,213 @@ class AndroidWebEngine {
         }
         return null;
 
+      case 'cmd_upload_from_url': {
+        const rawUrl = String(args.url ?? '').trim();
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const transferId = String(args.id ?? `url_${Date.now()}`);
+        const res = await fetch(rawUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        const guessedName =
+          String(args.filename ?? '').trim() ||
+          decodeURIComponent(new URL(rawUrl).pathname.split('/').pop() || '') ||
+          `remote_${Date.now()}`;
+        const client = await this.ensureClient();
+        const sent = await client.sendMedia(folderIdToPeer(folderId), {
+          type: 'document',
+          file: bytes,
+          fileName: guessedName,
+          fileMime: res.headers.get('content-type') || guessMimeType(guessedName),
+        });
+        this.state.bandwidth.uploaded += bytes.byteLength;
+        this.saveState();
+        dispatchLocalEvent('remote-upload-progress', {
+          id: transferId,
+          progress: 100,
+          downloaded_bytes: bytes.byteLength,
+          total_bytes: bytes.byteLength,
+        });
+        return sent.id;
+      }
+
+      case 'cmd_storage_clear':
+        for (const url of this.blobUrlCache.values()) URL.revokeObjectURL(url);
+        this.blobUrlCache.clear();
+        return null;
+
+      case 'cmd_storage_limits': {
+        const ownerId = String(args.ownerId ?? '');
+        if (ownerId && args.limits) {
+          this.state.storageLimits[ownerId] = args.limits as {
+            previews: number;
+            thumbnails: number;
+            converted: number;
+          };
+          this.saveState();
+        }
+        return null;
+      }
+
+      case 'cmd_get_transcode_capabilities':
+        return {
+          ffmpeg_available: false,
+          hardware_encoder: null,
+          cache_size_bytes: 0,
+          max_cache_gb: 2,
+          entries: [],
+        };
+
+      case 'cmd_get_cached_variants':
+        return [];
+
+      case 'cmd_set_transcode_cache_limit':
+        return null;
+
+      case 'cmd_clear_transcode_cache':
+        return 'Cleared 0 B';
+
+      case 'cmd_get_proxy_status':
+        return { reachable: navigator.onLine !== false, latency_ms: 1 };
+
+      case 'cmd_apply_proxy_settings':
+      case 'cmd_test_proxy_traffic':
+        return true;
+
+      case 'cmd_clear_proxy_secret':
+      case 'cmd_reconnect_with_network_settings':
+        return null;
+
+      case 'cmd_detect_vpn':
+        return false;
+
+      case 'cmd_get_api_settings':
+        return {
+          enabled: false,
+          running: false,
+          port: 49210,
+          bind_address: '127.0.0.1',
+          api_key: '',
+        };
+
+      case 'cmd_get_webdav_settings':
+        return {
+          enabled: false,
+          running: false,
+          port: 49211,
+          bind_address: '127.0.0.1',
+          username: 'tgdrive',
+          has_token: false,
+          token_preview: '',
+          mount_url: 'http://127.0.0.1:49211/',
+        };
+
       case 'cmd_get_bandwidth':
         return {
+          date: new Date().toISOString().slice(0, 10),
+          up_bytes: this.state.bandwidth.uploaded,
+          down_bytes: this.state.bandwidth.downloaded,
+          limit_bytes: 0,
+          period: 'weekly',
           uploaded_bytes: this.state.bandwidth.uploaded,
           downloaded_bytes: this.state.bandwidth.downloaded,
+        };
+
+      case 'cmd_set_weekly_quota':
+      case 'cmd_configure_android_transfer_recovery':
+      case 'cmd_migrate_proxy_secret':
+      case 'cmd_set_native_language':
+      case 'cmd_workspace_cancel_asset':
+        return null;
+
+      case 'cmd_get_notification_permission':
+      case 'cmd_request_notification_permission': {
+        if (isAndroidNative()) {
+          const env = await TelegramDriveNative.getTransferEnvironment().catch(() => null);
+          return env?.notification_permission ?? 'granted';
+        }
+        return 'granted';
+      }
+
+      case 'cmd_get_android_playback_history':
+      case 'cmd_transfer_list':
+      case 'cmd_get_sync_pairs':
+      case 'cmd_get_sync_conflicts':
+      case 'cmd_list_shares':
+        return [];
+
+      case 'cmd_transfer_activity':
+        return { activeCount: this.activeAborts.size, pausedCount: 0, queuedCount: 0 };
+
+      case 'cmd_get_stream_info':
+        return null;
+
+      case 'cmd_get_video_metadata':
+        return {
+          duration_secs: null,
+          width: null,
+          height: null,
+          video_codec: null,
+          audio_codec: null,
+          container: null,
+          needs_transcode: false,
+        };
+
+      case 'cmd_get_sync_settings':
+        return {
+          enabled: false,
+          scanner_enabled: false,
+          scan_interval_seconds: 300,
+        };
+
+      case 'cmd_get_sync_status':
+        return {
+          enabled: false,
+          running: false,
+          activePairs: 0,
+          pendingOps: 0,
+          conflicts: 0,
+          lastError: null,
+          pairs: [],
+        };
+
+      case 'cmd_workspace_asset': {
+        const folderId =
+          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+        const messageId = Number(args.messageId);
+        const kind = String(args.kind ?? 'preview');
+        if (kind === 'thumbnail') {
+          const thumb = await this.invoke('cmd_get_thumbnail', { folderId, messageId });
+          return { path: thumb, cached: Boolean(thumb) };
+        }
+        const prev = await this.invoke('cmd_get_preview', {
+          folderId,
+          messageId,
+          promptToken: args.promptToken,
+        });
+        return { path: prev, cached: Boolean(prev) };
+      }
+
+      case 'cmd_set_preview_cache_limit':
+        this.state.previewCacheMaxGb = Number(args.maxGb ?? 2);
+        this.saveState();
+        return null;
+
+      case 'cmd_get_detailed_transcode_cache':
+      case 'cmd_get_detailed_cache_info':
+        return {
+          entries: [],
+          total_bytes: 0,
+          max_bytes: Math.round(this.state.previewCacheMaxGb * 1024 * 1024 * 1024),
+          scan_in_progress: false,
+          last_scanned_at: Date.now(),
+          last_error: null,
+        };
+
+      case 'cmd_get_cache_info':
+        return {
+          total_bytes: 0,
+          file_count: this.blobUrlCache.size,
         };
 
       case 'cmd_get_offline_cache_status':

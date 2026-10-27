@@ -94,33 +94,32 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
     const prepare = async () => {
       if ((isVideo || isAudio) && !usingDownloadFallback) {
         try {
-          const streamInfo = await invoke<StreamInfo>('cmd_get_stream_info');
+          const streamInfo = await invoke<StreamInfo | null>('cmd_get_stream_info');
           if (cancelled) return;
-          const folder = activeFolderId === null ? 'home' : String(activeFolderId);
-          const credential = streamInfo.operation_token ? `&credential=${encodeURIComponent(streamInfo.operation_token)}` : '';
-          const streamUrl = `${streamInfo.base_url}/stream/${folder}/${file.id}?token=${encodeURIComponent(streamInfo.token)}${credential}`;
-          await invoke('cmd_open_android_stream_player', {
-            streamUrl,
-            title: file.name,
-            mimeType: file.mime_type && file.mime_type !== 'application/octet-stream'
-              ? file.mime_type
-              : isVideo ? 'video/*' : 'audio/*',
-            mediaId: `${activeFolderId ?? 'home'}:${file.id}`,
-            preferencesJson: JSON.stringify(preferences ?? {
-              privateMetadata: true,
-              privacyScreen: false,
-              orientation: 'auto',
-              subtitleScale: 1,
-              playbackSpeed: 1,
-            }),
-          });
-          if (!cancelled) onClose();
-          return;
-        } catch (streamError) {
-          if (cancelled) return;
-          setError(userFacingError(streamError, t));
-          setLoading(false);
-          return;
+          if (streamInfo?.base_url && streamInfo?.token) {
+            const folder = activeFolderId === null ? 'home' : String(activeFolderId);
+            const credential = streamInfo.operation_token ? `&credential=${encodeURIComponent(streamInfo.operation_token)}` : '';
+            const streamUrl = `${streamInfo.base_url}/stream/${folder}/${file.id}?token=${encodeURIComponent(streamInfo.token)}${credential}`;
+            await invoke('cmd_open_android_stream_player', {
+              streamUrl,
+              title: file.name,
+              mimeType: file.mime_type && file.mime_type !== 'application/octet-stream'
+                ? file.mime_type
+                : isVideo ? 'video/*' : 'audio/*',
+              mediaId: `${activeFolderId ?? 'home'}:${file.id}`,
+              preferencesJson: JSON.stringify(preferences ?? {
+                privateMetadata: true,
+                privacyScreen: false,
+                orientation: 'auto',
+                subtitleScale: 1,
+                playbackSpeed: 1,
+              }),
+            });
+            if (!cancelled) onClose();
+            return;
+          }
+        } catch {
+          // Fall back automatically to in-app cached playback when native local HTTP streaming is unavailable.
         }
       }
       await prepareCachedMedia();

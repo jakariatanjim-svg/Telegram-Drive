@@ -9,12 +9,18 @@ export interface PickedAndroidFile {
 }
 
 export interface AndroidEnvironmentSnapshot {
+  connected: boolean;
+  metered: boolean;
+  roaming: boolean;
+  charging: boolean;
+  batteryLow: boolean;
+  storageLow: boolean;
+  freeBytes: number;
+  powerSaveMode: boolean;
+  backgroundRestricted: boolean;
   network_connected: boolean;
   wifi_connected: boolean;
-  roaming: boolean;
-  metered: boolean;
   battery_percent: number;
-  charging: boolean;
   power_save_mode: boolean;
   available_storage_bytes: number;
   notification_permission: 'granted' | 'denied' | 'prompt';
@@ -91,5 +97,8 @@ export function getElectronBridge(): ElectronPreloadBridge | null {
 
 export function isAndroidNative(): boolean {
   if (getElectronBridge()) return false;
+  if (typeof window !== 'undefined' && 'androidBridge' in window && Boolean((window as unknown as { androidBridge?: unknown }).androidBridge)) {
+    return true;
+  }
   return Capacitor.getPlatform() === 'android';
 }

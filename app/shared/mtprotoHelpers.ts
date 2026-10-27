@@ -98,7 +98,14 @@ export interface MappedTelegramFile {
   created_at?: string;
   folder_id: number | null;
   is_favorite?: boolean;
-  encryption_state?: 'plain' | 'encrypted_v2_vault' | 'encrypted_v2_passphrase';
+  encryption_state?: 'plain' | 'encrypted_unlocked' | 'encrypted_locked';
+  encryption?: {
+    state: 'plain' | 'encrypted_unlocked' | 'encrypted_locked';
+    envelope_version?: number;
+    protection_mode?: 'vault' | 'passphrase';
+    metadata_protected?: boolean;
+    ciphertext_size?: number;
+  };
   vault_id?: string | null;
   protect_metadata?: boolean;
   caption?: string;
@@ -111,6 +118,7 @@ export function mapMessageToTelegramFile(
     customName?: string;
     favorite?: boolean;
     encryptedRecord?: EncryptedFileRecord;
+    vaultUnlocked?: boolean;
   } = {},
 ): MappedTelegramFile | null {
   if (!msg || !msg.media) return null;
@@ -150,10 +158,18 @@ export function mapMessageToTelegramFile(
   const mime = media.mimeType || guessMimeType(displayName);
 
   let encryptionState: MappedTelegramFile['encryption_state'] = 'plain';
-  if (encRec) {
-    encryptionState = encRec.mode === 'vault' ? 'encrypted_v2_vault' : 'encrypted_v2_passphrase';
-  } else if (isTgd) {
-    encryptionState = 'encrypted_v2_vault';
+  let encryptionInfo: MappedTelegramFile['encryption'] = undefined;
+  if (encRec || isTgd) {
+    const mode = encRec?.mode ?? 'vault';
+    encryptionState =
+      mode === 'vault' && overrides.vaultUnlocked ? 'encrypted_unlocked' : 'encrypted_locked';
+    encryptionInfo = {
+      state: encryptionState,
+      envelope_version: 1,
+      protection_mode: mode,
+      metadata_protected: Boolean(encRec?.protectMetadata),
+      ciphertext_size: typeof media.fileSize === 'number' ? media.fileSize : size,
+    };
   }
 
   return {
@@ -167,6 +183,7 @@ export function mapMessageToTelegramFile(
     folder_id: folderId,
     is_favorite: Boolean(overrides.favorite),
     encryption_state: encryptionState,
+    encryption: encryptionInfo,
     vault_id: encRec?.vaultId ?? null,
     protect_metadata: encRec?.protectMetadata ?? false,
     caption: msg.text || undefined,
