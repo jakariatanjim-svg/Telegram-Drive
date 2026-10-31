@@ -258,7 +258,7 @@ export function PreviewModal({
         };
         let idleId: number | undefined;
         const timerId = window.setTimeout(() => {
-            if (getCachedPreview(nextFile.id, activeFolderId)) return;
+            if (settings.dataSaverMode || getCachedPreview(nextFile.id, activeFolderId)) return;
             if (idleWindow.requestIdleCallback) {
                 idleId = idleWindow.requestIdleCallback(
                     () => { void loadPreview(nextFile.id, activeFolderId).catch(() => {}); },
@@ -273,7 +273,7 @@ export function PreviewModal({
             window.clearTimeout(timerId);
             if (idleId !== undefined) idleWindow.cancelIdleCallback?.(idleId);
         };
-    }, [fullReady, nextFile, activeFolderId, settings.bandwidth_schedule, settings.bandwidthLimitDownKBs, localPath]);
+    }, [fullReady, nextFile, activeFolderId, settings.bandwidth_schedule, settings.bandwidthLimitDownKBs, settings.dataSaverMode, localPath]);
 
     useEffect(() => {
         if (!fullReady) return;

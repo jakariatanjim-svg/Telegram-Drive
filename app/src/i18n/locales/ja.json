@@ -429,7 +429,17 @@
     "hide_passphrase": "パスフレーズを隠す",
     "current_vault_passphrase": "現在の保管庫パスフレーズ",
     "videoFilenameCaption": "ファイル名のキャプション",
-    "videoFilenameCaptionDesc": "動画メッセージに元のファイル名を追加します。暗号化されたアップロードでは名前を公開しません。"
+    "videoFilenameCaptionDesc": "動画メッセージに元のファイル名を追加します。暗号化されたアップロードでは名前を公開しません。",
+    "ffmpeg_install_in_app": "アプリ内で FFmpeg をインストール",
+    "ffmpeg_installing": "FFmpeg をインストール中 ({{percent}}%)…",
+    "ffmpeg_extracting": "data/bin に FFmpeg を展開中…",
+    "ffmpeg_installed_ready": "FFmpeg 検出済み・利用可能",
+    "ffmpeg_install_success": "FFmpeg が data/bin にインストールされ、すぐに使用できます。",
+    "data_saver_mode": "データセーバー",
+    "data_saver_desc": "バックグラウンドでのサムネイル先読みを停止し、メディアの先読みバッファを抑えてモバイル通信量を節約します。",
+    "notice_split_file": "大容量ファイル ({{name}}) は自動的に {{count}} 分割で処理されています（一覧には1つのファイルとして表示されます）。",
+    "notice_ultra_low_ram": "低メモリ端末を検出しました：大容量ファイルは省メモリ分割ストリーミングで処理されますが、高負荷時にはわずかなバッファリングが発生する場合があります。",
+    "notice_mobile_data_large": "大容量ファイル ({{size}}) にモバイルデータ通信を使用しています。設定からいつでもデータセーバーをオンにして通信量を抑えられます。"
   },
   "files": {
     "download": "ダウンロード",

@@ -430,7 +430,17 @@
     "encryption_experimental_inventory_many": "Hay {{count}} archivos cifrados experimentales indexados localmente. Sus textos cifrados se han conservado.",
     "current_vault_passphrase": "Contraseña actual de la bóveda",
     "videoFilenameCaption": "Nombres de archivo como subtítulos",
-    "videoFilenameCaptionDesc": "Añade el nombre original a los mensajes de vídeo. Las subidas cifradas lo mantienen privado."
+    "videoFilenameCaptionDesc": "Añade el nombre original a los mensajes de vídeo. Las subidas cifradas lo mantienen privado.",
+    "ffmpeg_install_in_app": "Instalar FFmpeg en la aplicación",
+    "ffmpeg_installing": "Instalando FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Extrayendo FFmpeg en data/bin…",
+    "ffmpeg_installed_ready": "FFmpeg detectado y listo",
+    "ffmpeg_install_success": "FFmpeg se instaló en data/bin y está listo para usarse.",
+    "data_saver_mode": "Ahorro de datos",
+    "data_saver_desc": "Omite la precarga de miniaturas en segundo plano y limita el búfer multimedia para ahorrar datos móviles.",
+    "notice_split_file": "El archivo grande ({{name}}) se procesa automáticamente en {{count}} partes y se mostrará como un solo archivo.",
+    "notice_ultra_low_ram": "Teléfono con poca RAM detectado: los archivos grandes usan transmisión segura por fragmentos, aunque la multitarea intensa puede causar leves pausas.",
+    "notice_mobile_data_large": "Usando datos móviles para un archivo grande ({{size}}). Activa Ahorro de datos en Ajustes para reducir el consumo."
   },
   "files": {
     "download": "Descargar",

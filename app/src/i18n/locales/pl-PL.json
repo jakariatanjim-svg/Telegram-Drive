@@ -431,7 +431,17 @@
     "hide_passphrase": "Ukryj frazę hasła",
     "current_vault_passphrase": "Aktualne hasło sejfu",
     "videoFilenameCaption": "Nazwy plików w podpisach",
-    "videoFilenameCaptionDesc": "Dodaj oryginalną nazwę pliku do wiadomości wideo. Przy szyfrowanym przesyłaniu pozostaje ona prywatna."
+    "videoFilenameCaptionDesc": "Dodaj oryginalną nazwę pliku do wiadomości wideo. Przy szyfrowanym przesyłaniu pozostaje ona prywatna.",
+    "ffmpeg_install_in_app": "Zainstaluj FFmpeg w aplikacji",
+    "ffmpeg_installing": "Instalowanie FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Rozpakowywanie FFmpeg do data/bin…",
+    "ffmpeg_installed_ready": "FFmpeg wykryty i gotowy",
+    "ffmpeg_install_success": "FFmpeg został zainstalowany w data/bin i jest gotowy do użycia.",
+    "data_saver_mode": "Oszczędzanie danych",
+    "data_saver_desc": "Pomija pobieranie miniatur w tle i ogranicza bufor multimediów, aby oszczędzać dane mobilne.",
+    "notice_split_file": "Duży plik ({{name}}) jest automatycznie dzielony na {{count}} części — będzie widoczny jako pojedynczy plik.",
+    "notice_ultra_low_ram": "Wykryto telefon z małą ilością RAM: duże pliki są przesyłane strumieniowo w małych blokach, choć wiele aplikacji w tle może powodować lekkie buforowanie.",
+    "notice_mobile_data_large": "Używasz danych mobilnych dla dużego pliku ({{size}}). Włącz Oszczędzanie danych w Ustawieniach, aby zmniejszyć zużycie."
   },
   "files": {
     "download": "Pobierać",

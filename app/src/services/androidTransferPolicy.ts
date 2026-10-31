@@ -44,13 +44,18 @@ export function evaluateAndroidTransferPolicy(
   if (settings.androidPauseOnLowBattery && environment.batteryLow && !environment.charging) {
     return { allowed: false, reason: 'Transfers are paused while the battery is low' };
   }
-  if (environment.storageLow) {
-    return { allowed: false, reason: 'Android reports that device storage is low' };
-  }
-  const configuredReserve = Math.max(0.25, settings.androidMinimumFreeStorageGb) * GIB;
-  const required = Math.max(0, requiredDownloadBytes) + STORAGE_SAFETY_MARGIN_BYTES;
-  if (environment.freeBytes < Math.max(configuredReserve, required)) {
-    return { allowed: false, reason: 'Not enough free storage for this transfer' };
+  // Only enforce full storage reserve when a download size is specified; zero-copy uploads need minimal scratch space.
+  if (requiredDownloadBytes > 0) {
+    if (environment.storageLow) {
+      return { allowed: false, reason: 'Android reports that device storage is low' };
+    }
+    const configuredReserve = Math.max(0.25, settings.androidMinimumFreeStorageGb) * GIB;
+    const required = Math.max(0, requiredDownloadBytes) + STORAGE_SAFETY_MARGIN_BYTES;
+    if (environment.freeBytes < Math.max(configuredReserve, required)) {
+      return { allowed: false, reason: 'Not enough free storage for this transfer' };
+    }
+  } else if (environment.freeBytes > 0 && environment.freeBytes < 64 * 1024 * 1024) {
+    return { allowed: false, reason: 'Device storage is critically full (< 64 MB free)' };
   }
   return { allowed: true };
 }

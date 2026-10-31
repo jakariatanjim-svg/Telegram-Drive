@@ -785,6 +785,8 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                 <SettingsRow icon={<Tag className="h-4 w-4 text-telegram-subtext" />} title={t('common.hide_groups')} description={t('common.hide_groups_desc')} control={<SettingsToggle checked={settings.hideGroups} label={t('common.hide_groups')} onChange={() => updateSetting('hideGroups', !settings.hideGroups)} />} />
 
                                 <SettingsRow icon={<Zap className="h-4 w-4 text-telegram-subtext" />} title={t('settings.performance_mode')} description={t('settings.performance_mode_desc')} control={<SettingsToggle checked={settings.performanceMode} label={t('settings.performance_mode')} onChange={() => updateSetting('performanceMode', !settings.performanceMode)} />} />
+
+                                <SettingsRow icon={<Wifi className="h-4 w-4 text-telegram-subtext" />} title={t('settings.data_saver_mode')} description={t('settings.data_saver_desc')} control={<SettingsToggle checked={settings.dataSaverMode} label={t('settings.data_saver_mode')} onChange={() => updateSetting('dataSaverMode', !settings.dataSaverMode)} />} />
                             </section>
 
                             {/* Language & Region Section */}
@@ -1109,7 +1111,13 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                         </div>
                                     </div>
 
-                                    <FfmpegInstallNotice available={transcodeCapabilities?.available} />
+                                    <FfmpegInstallNotice
+                                        available={transcodeCapabilities?.available}
+                                        onInstalled={() => {
+                                            void fetchTranscodeCapabilities();
+                                            void fetchTranscodeCache(true);
+                                        }}
+                                    />
 
                                     {/* Cache entries list */}
                                     {cacheLoading && !transcodeCache ? (

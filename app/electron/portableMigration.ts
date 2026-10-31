@@ -2,7 +2,7 @@ import childProcess from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { app } from 'electron';
+import { app, shell } from 'electron';
 import { unzipSync, zipSync } from 'fflate';
 import { atomicWriteFileSync, clearPortableKeyCache } from './mtprotoNode';
 import { getPortablePaths } from './portablePaths';
@@ -36,6 +36,7 @@ export interface RelocatePortableResult {
   mode: 'copy' | 'move';
   copiedBytes: number;
   fileCount: number;
+  updatedShortcutsCount?: number;
 }
 
 export interface PortableBundleImportResult {
@@ -281,7 +282,7 @@ export async function relocatePortableApp(
 
   const targetDataDir = path.join(targetDir, 'data');
   // Ensure portable subdirectories exist in target
-  for (const sub of ['db', 'session', 'stores', 'cache', 'logs', 'chromium']) {
+  for (const sub of ['db', 'session', 'stores', 'backups', 'bin', 'cache', 'logs', 'chromium']) {
     fs.mkdirSync(path.join(targetDataDir, sub), { recursive: true });
   }
 
@@ -314,6 +315,15 @@ export async function relocatePortableApp(
   const candidateExe = path.join(targetDir, exeName);
   const canLaunchExecutable = isPackaged && fs.existsSync(candidateExe);
 
+  let updatedShortcutsCount = 0;
+  if (options.mode === 'move' && canLaunchExecutable && process.platform === 'win32') {
+    updatedShortcutsCount = updateWindowsShortcutsOnMove(
+      paths.installDir,
+      targetDir,
+      candidateExe,
+    );
+  }
+
   hooks.onProgress?.({
     phase: 'completed',
     percent: 100,
@@ -329,7 +339,182 @@ export async function relocatePortableApp(
     mode: options.mode,
     copiedBytes,
     fileCount: filesToCopy.length,
+    updatedShortcutsCount,
   };
+}
+
+function collectCandidateShortcutPaths(): string[] {
+  if (process.platform !== 'win32') return [];
+  const home = os.homedir();
+  const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const programData = process.env.ProgramData || 'C:\\ProgramData';
+  const publicDir = process.env.PUBLIC || 'C:\\Users\\Public';
+
+  const roots = new Set<string>();
+  try {
+    roots.add(app.getPath('desktop'));
+  } catch {
+    // Ignore
+  }
+  roots.add(path.join(home, 'Desktop'));
+  if (process.env.OneDrive) roots.add(path.join(process.env.OneDrive, 'Desktop'));
+  if (process.env.OneDriveConsumer) roots.add(path.join(process.env.OneDriveConsumer, 'Desktop'));
+  roots.add(path.join(publicDir, 'Desktop'));
+  roots.add(path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'));
+  roots.add(path.join(programData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'));
+  roots.add(
+    path.join(
+      appData,
+      'Microsoft',
+      'Internet Explorer',
+      'Quick Launch',
+      'User Pinned',
+      'TaskBar',
+    ),
+  );
+
+  const lnkPaths: string[] = [];
+  for (const root of roots) {
+    if (!root || !fs.existsSync(root)) continue;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(root, ent.name);
+      if (ent.isFile() && ent.name.toLowerCase().endsWith('.lnk')) {
+        lnkPaths.push(full);
+      } else if (ent.isDirectory()) {
+        try {
+          const subEntries = fs.readdirSync(full, { withFileTypes: true });
+          for (const sub of subEntries) {
+            if (sub.isFile() && sub.name.toLowerCase().endsWith('.lnk')) {
+              lnkPaths.push(path.join(full, sub.name));
+            }
+          }
+        } catch {
+          // Ignore inaccessible subfolders
+        }
+      }
+    }
+  }
+  return lnkPaths;
+}
+
+export function updateWindowsShortcutsOnMove(
+  oldInstallDir: string,
+  newInstallDir: string,
+  newExePath: string,
+): number {
+  if (process.platform !== 'win32' || !fs.existsSync(newExePath)) return 0;
+
+  let updatedCount = 0;
+  const lnkCandidates = collectCandidateShortcutPaths();
+  const psFallbackLinks: string[] = [];
+
+  for (const lnkPath of lnkCandidates) {
+    const fileBase = path.basename(lnkPath);
+    const isTelegramDriveShortcutName = /^telegram[\s_-]*drive\.lnk$/i.test(fileBase);
+    let existingDetails: Electron.ShortcutDetails | null = null;
+    try {
+      existingDetails = shell.readShortcutLink(lnkPath);
+    } catch {
+      existingDetails = null;
+    }
+
+    const existingTarget = existingDetails?.target ?? '';
+    const pointsToOldDir = Boolean(existingTarget && isSameOrInside(oldInstallDir, existingTarget));
+    const pointsToTelegramDriveExe = Boolean(
+      isTelegramDriveShortcutName &&
+        (!existingTarget ||
+          !fs.existsSync(existingTarget) ||
+          /telegram[\s_-]*drive\.exe$/i.test(path.basename(existingTarget))),
+    );
+
+    if (!pointsToOldDir && !pointsToTelegramDriveExe) continue;
+
+    let wrote = false;
+    try {
+      wrote = shell.writeShortcutLink(lnkPath, existingDetails ? 'update' : 'replace', {
+        target: newExePath,
+        cwd: newInstallDir,
+        args: existingDetails?.args || '',
+        description: existingDetails?.description || 'Telegram Drive',
+        icon: newExePath,
+        iconIndex: 0,
+      });
+    } catch {
+      wrote = false;
+    }
+
+    if (wrote) {
+      updatedCount++;
+    } else {
+      psFallbackLinks.push(lnkPath);
+    }
+  }
+
+  // Fallback via WScript.Shell COM for any shortcut where shell.writeShortcutLink returned false
+  if (psFallbackLinks.length > 0) {
+    try {
+      const psEsc = (s: string) => s.replace(/'/g, "''");
+      const listLiteral = psFallbackLinks.map(p => `'${psEsc(p)}'`).join(', ');
+      const psCmd = [
+        `$ErrorActionPreference = 'SilentlyContinue'`,
+        `$wsh = New-Object -ComObject WScript.Shell`,
+        `foreach ($p in @(${listLiteral})) {`,
+        `  if (Test-Path -LiteralPath $p) {`,
+        `    $sc = $wsh.CreateShortcut($p)`,
+        `    $sc.TargetPath = '${psEsc(newExePath)}'`,
+        `    $sc.WorkingDirectory = '${psEsc(newInstallDir)}'`,
+        `    $sc.IconLocation = '${psEsc(newExePath)},0'`,
+        `    $sc.Save()`,
+        `  }`,
+        `}`,
+      ].join('; ');
+      const res = childProcess.spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
+        { stdio: 'ignore', timeout: 6000, windowsHide: true },
+      );
+      if (res.status === 0) {
+        updatedCount += psFallbackLinks.length;
+      }
+    } catch {
+      // Best-effort shortcut fallback
+    }
+  }
+
+  // Best-effort update of user-scope NSIS Uninstall registry entry if pointing to oldInstallDir
+  try {
+    const psEsc = (s: string) => s.replace(/'/g, "''");
+    const newUninstaller = path.join(newInstallDir, 'Uninstall Telegram Drive.exe');
+    const regCmd = [
+      `$ErrorActionPreference = 'SilentlyContinue'`,
+      `$oldNorm = [IO.Path]::GetFullPath('${psEsc(oldInstallDir)}').TrimEnd('\\')`,
+      `Get-ChildItem 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall' | ForEach-Object {`,
+      `  $p = Get-ItemProperty $_.PSPath`,
+      `  if ($p.DisplayName -like '*Telegram Drive*' -or ($p.InstallLocation -and ([IO.Path]::GetFullPath($p.InstallLocation).TrimEnd('\\') -ieq $oldNorm))) {`,
+      `    Set-ItemProperty -Path $_.PSPath -Name 'InstallLocation' -Value '${psEsc(newInstallDir)}'`,
+      `    Set-ItemProperty -Path $_.PSPath -Name 'DisplayIcon' -Value '${psEsc(newExePath)},0'`,
+      ...(fs.existsSync(newUninstaller)
+        ? [`    Set-ItemProperty -Path $_.PSPath -Name 'UninstallString' -Value '"${psEsc(newUninstaller)}"'`]
+        : []),
+      `  }`,
+      `}`,
+    ].join('; ');
+    childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-Command', regCmd],
+      { stdio: 'ignore', timeout: 5000, windowsHide: true },
+    );
+  } catch {
+    // Best-effort registry metadata update
+  }
+
+  return updatedCount;
 }
 
 export function launchRelocatedAppAndExit(

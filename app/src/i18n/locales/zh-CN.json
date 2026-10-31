@@ -429,7 +429,17 @@
     "hide_passphrase": "隐藏密码短语",
     "current_vault_passphrase": "当前保险库口令",
     "videoFilenameCaption": "文件名说明",
-    "videoFilenameCaptionDesc": "将原始文件名添加到视频消息说明中。加密上传会保护文件名隐私。"
+    "videoFilenameCaptionDesc": "将原始文件名添加到视频消息说明中。加密上传会保护文件名隐私。",
+    "ffmpeg_install_in_app": "在应用内安装 FFmpeg",
+    "ffmpeg_installing": "正在安装 FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "正在将 FFmpeg 解压到 data/bin…",
+    "ffmpeg_installed_ready": "已检测到 FFmpeg 且准备就绪",
+    "ffmpeg_install_success": "FFmpeg 已安装到 data/bin 目录，可立即使用。",
+    "data_saver_mode": "省流模式",
+    "data_saver_desc": "跳过后台缩略图预加载并限制媒体预读缓冲，以节省移动数据流量。",
+    "notice_split_file": "大文件 ({{name}}) 正在自动分为 {{count}} 个分片处理——在文件夹中仍显示为单个文件。",
+    "notice_ultra_low_ram": "检测到低内存手机：大文件已启用低内存安全分块流式处理，多任务高负载时可能出现轻微缓冲。",
+    "notice_mobile_data_large": "正在使用移动数据加载大文件 ({{size}})。可随时在设置中开启“省流模式”以减少额外流量消耗。"
   },
   "files": {
     "download": "下载",

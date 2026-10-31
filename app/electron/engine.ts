@@ -35,6 +35,8 @@ import {
   atomicWriteFileSync,
   createNodeTelegramClient,
   readEncryptedSecretFile,
+  readResilientJsonFile,
+  removeResilientBackupsSync,
   writeEncryptedSecretFile,
   type ProxySettingsConfig,
 } from './mtprotoNode';
@@ -46,9 +48,33 @@ import {
   relocatePortableApp,
 } from './portableMigration';
 import { getPortablePaths } from './portablePaths';
-import { VideoTranscodeManager } from './transcoder';
+import {
+  VideoTranscodeManager,
+  cancelPortableFfmpegInstall,
+  getFfmpegInstallState,
+  installPortableFfmpeg,
+  resetFfmpegDetectionCache,
+  resolveFfmpegDetails,
+} from './transcoder';
 import { checkGithubUpdate, downloadAndInstallWindowsUpdate } from './updater';
 import { runRobustQrSignIn } from '../shared/qrAuthLoop';
+import {
+  ENCRYPTED_SPLIT_PART_SIZE_BYTES,
+  SPLIT_PART_SIZE_BYTES,
+  buildSplitManifestCaption,
+  buildSplitManifestFileName,
+  buildSplitPartCaption,
+  buildSplitPartFileName,
+  computeSplitPartPlan,
+  isSplitPartMessage,
+  mapSplitManifestToTelegramFile,
+  parseSplitManifestFromMessage,
+  parseSplitManifestJsonBytes,
+  resolveRangeAcrossParts,
+  shouldSplitUpload,
+  type SplitFileManifest,
+  type SplitUploadCheckpoint,
+} from '../shared/splitFiles';
 
 export type EventEmitterFn = (event: string, payload: unknown) => void;
 
@@ -131,6 +157,8 @@ interface PersistedDatabase {
     settings: VaultStateSettings | null;
     encryptedFiles: EncryptedFileRecord[];
   };
+  splitManifests: Record<string, SplitFileManifest>;
+  splitUploadCheckpoints: Record<string, SplitUploadCheckpoint>;
   bandwidth: { uploaded: number; downloaded: number };
 }
 
@@ -248,6 +276,13 @@ function isPeerCacheMissError(err: unknown): boolean {
   return /MtPeerNotFoundError|not found in local cache|CHANNEL_INVALID|PEER_ID_INVALID/i.test(text);
 }
 
+function isTransientTransferNetworkError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UND_ERR|FETCH_FAILED|socket hang up|network|TIMEOUT|FLOOD_WAIT/i.test(
+    text,
+  );
+}
+
 export class DesktopEngine {
   private db!: PersistedDatabase;
   private dbFilePath!: string;
@@ -295,6 +330,8 @@ export class DesktopEngine {
   private filesCache = new Map<string, MappedTelegramFile[]>();
   private transfers = new Map<string, TransferJobRecord>();
   private activeAbortControllers = new Map<string, AbortController>();
+  private explicitlyCancelledTransfers = new Set<string>();
+  private directActiveDirections = new Map<string, 'upload' | 'download'>();
   private maxConcurrentUploads = 3;
   private maxConcurrentDownloads = 3;
   private syncWatchers = new Map<number, fs.FSWatcher>();
@@ -302,9 +339,22 @@ export class DesktopEngine {
   constructor(private readonly emitEvent: EventEmitterFn = () => {}) {
     this.servers = new LocalServersManager({
       resolveFileMeta: async (folderId, messageId) => {
-        const msg = await this.fetchSingleMessage(folderId, messageId);
         const key = fileCompositeKey(folderId, messageId);
         const encRec = this.vault.getEncryptedFileRecord(key);
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        if (splitManifest) {
+          const customName = this.db.fileRenames[key];
+          const displayName = customName || encRec?.originalName || splitManifest.name || `file_${messageId}`;
+          return {
+            name: displayName,
+            size: encRec?.originalSize ?? splitManifest.totalSize,
+            mimeType: splitManifest.encrypted
+              ? guessMimeType(displayName)
+              : splitManifest.mime || guessMimeType(displayName),
+            encrypted: Boolean(encRec || splitManifest.encrypted),
+          };
+        }
+        const msg = await this.fetchSingleMessage(folderId, messageId);
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.db.fileRenames[key],
           favorite: this.db.favorites.includes(key),
@@ -319,8 +369,26 @@ export class DesktopEngine {
         };
       },
       readPlainRange: (folderId, messageId, start, endInclusive, signal) =>
-        this.streamTelegramRange(folderId, messageId, start, endInclusive, signal),
+        this.streamFileRange(folderId, messageId, start, endInclusive, signal),
       readDecryptedFull: async (folderId, messageId) => {
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        if (splitManifest && splitManifest.encrypted) {
+          const decryptedParts: Uint8Array[] = [];
+          let totalPlain = 0;
+          for (const part of splitManifest.parts) {
+            const rawPart = await this.downloadRawTelegramBytes(folderId, part.id);
+            const plainPart = this.vault.decryptBuffer(rawPart).plaintext;
+            decryptedParts.push(plainPart);
+            totalPlain += plainPart.byteLength;
+          }
+          const out = new Uint8Array(totalPlain);
+          let off = 0;
+          for (const p of decryptedParts) {
+            out.set(p, off);
+            off += p.byteLength;
+          }
+          return out;
+        }
         const raw = await this.downloadRawTelegramBytes(folderId, messageId);
         return this.vault.decryptBuffer(raw).plaintext;
       },
@@ -472,20 +540,55 @@ export class DesktopEngine {
         settings: null,
         encryptedFiles: [],
       },
+      splitManifests: {},
+      splitUploadCheckpoints: {},
       bandwidth: { uploaded: 0, downloaded: 0 },
     };
 
-    if (fs.existsSync(this.dbFilePath)) {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(this.dbFilePath, 'utf8')) as Partial<PersistedDatabase>;
-        this.db = { ...defaults, ...parsed };
-        return;
-      } catch {
-        // Recover cleanly with defaults if corrupted
-      }
+    const recovered = readResilientJsonFile<Partial<PersistedDatabase>>(this.dbFilePath);
+    if (recovered) {
+      this.db = {
+        ...defaults,
+        ...recovered,
+        splitManifests: recovered.splitManifests ?? {},
+        splitUploadCheckpoints: recovered.splitUploadCheckpoints ?? {},
+      };
+      return;
     }
     this.db = defaults;
     this.flushDatabase();
+  }
+
+  public getActiveTransferSummary(): {
+    activeUploads: number;
+    activeDownloads: number;
+    totalActive: number;
+  } {
+    let activeUploads = 0;
+    let activeDownloads = 0;
+    const countedIds = new Set<string>();
+
+    for (const job of this.transfers.values()) {
+      if (job.direction === 'upload' && ['uploading', 'encrypting'].includes(job.status)) {
+        activeUploads++;
+        countedIds.add(job.id);
+      } else if (job.direction === 'download' && ['downloading', 'decrypting'].includes(job.status)) {
+        activeDownloads++;
+        countedIds.add(job.id);
+      }
+    }
+
+    for (const [id, dir] of this.directActiveDirections.entries()) {
+      if (countedIds.has(id)) continue;
+      if (dir === 'upload') activeUploads++;
+      else activeDownloads++;
+    }
+
+    return {
+      activeUploads,
+      activeDownloads,
+      totalActive: activeUploads + activeDownloads,
+    };
   }
 
   private scheduleSave(): void {
@@ -697,6 +800,137 @@ export class DesktopEngine {
     return merged;
   }
 
+  private async ensureSplitManifestLoaded(
+    folderId: number | null,
+    messageId: number,
+  ): Promise<SplitFileManifest | null> {
+    const key = fileCompositeKey(folderId, messageId);
+    const cached = this.db.splitManifests?.[key];
+    if (cached && Array.isArray(cached.parts) && cached.parts.length > 0) {
+      return cached;
+    }
+
+    const msg = await this.fetchSingleMessage(folderId, messageId);
+    const parsedCaption = parseSplitManifestFromMessage(msg);
+    if (!parsedCaption) {
+      return null;
+    }
+
+    if (parsedCaption.inlineManifest) {
+      this.db.splitManifests[key] = parsedCaption.inlineManifest;
+      this.scheduleSave();
+      return parsedCaption.inlineManifest;
+    }
+
+    // For ultra-large manifests (>85 parts / >160 GB) whose part list exceeded caption length,
+    // read the full JSON body from the lightweight .tgmanifest-<groupId>.json document.
+    const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId);
+    const fullManifest = parseSplitManifestJsonBytes(rawBytes);
+    if (fullManifest) {
+      this.db.splitManifests[key] = fullManifest;
+      this.scheduleSave();
+      return fullManifest;
+    }
+
+    return null;
+  }
+
+  private async *streamFileRange(
+    folderId: number | null,
+    messageId: number,
+    start: number,
+    endInclusive: number,
+    signal: AbortSignal,
+  ): AsyncGenerator<Uint8Array> {
+    const manifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+    if (manifest && !manifest.encrypted) {
+      const slices = resolveRangeAcrossParts(manifest.parts, start, endInclusive);
+      for (const slice of slices) {
+        if (signal.aborted) break;
+        for await (const chunk of this.streamTelegramRange(
+          folderId,
+          slice.messageId,
+          slice.partLocalStart,
+          slice.partLocalEndInclusive,
+          signal,
+        )) {
+          if (signal.aborted) break;
+          yield chunk;
+        }
+      }
+      return;
+    }
+
+    yield* this.streamTelegramRange(folderId, messageId, start, endInclusive, signal);
+  }
+
+  private async streamFullFileToDisk(
+    folderId: number | null,
+    messageId: number,
+    targetPath: string,
+    onProgress?: (pct: number) => void,
+    promptToken?: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const tmpOut = `${targetPath}.tmp`;
+    const key = fileCompositeKey(folderId, messageId);
+    const encRec = this.vault.getEncryptedFileRecord(key);
+    const manifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+    const abortSig = signal ?? new AbortController().signal;
+
+    const writeChunkWithBackpressure = async (ws: fs.WriteStream, buf: Uint8Array) => {
+      if (!ws.write(Buffer.from(buf))) {
+        await new Promise<void>(resolve => ws.once('drain', resolve));
+      }
+    };
+
+    const ws = fs.createWriteStream(tmpOut);
+    try {
+      if (manifest && (manifest.encrypted || encRec)) {
+        let doneParts = 0;
+        for (const part of manifest.parts) {
+          if (abortSig.aborted) throw new Error('CANCELLED');
+          const rawPart = await this.downloadRawTelegramBytes(folderId, part.id, undefined, abortSig);
+          const plainPart = this.vault.decryptBuffer(rawPart, { promptToken }).plaintext;
+          await writeChunkWithBackpressure(ws, plainPart);
+          doneParts++;
+          onProgress?.(Math.round((doneParts / manifest.parts.length) * 100));
+        }
+      } else if (encRec) {
+        const rawBytes = await this.downloadRawTelegramBytes(
+          folderId,
+          messageId,
+          (done, total) => {
+            if (total > 0) onProgress?.(Math.round((done / total) * 100));
+          },
+          abortSig,
+        );
+        const plain = this.vault.decryptBuffer(rawBytes, { promptToken }).plaintext;
+        await writeChunkWithBackpressure(ws, plain);
+      } else {
+        const total = manifest
+          ? manifest.totalSize
+          : (((await this.fetchSingleMessage(folderId, messageId)).media as { fileSize?: number } | null)?.fileSize ?? 0);
+        let done = 0;
+        if (total > 0) {
+          for await (const chunk of this.streamFileRange(folderId, messageId, 0, total - 1, abortSig)) {
+            await writeChunkWithBackpressure(ws, chunk);
+            done += chunk.byteLength;
+            onProgress?.(Math.min(99, Math.round((done / total) * 100)));
+          }
+        }
+      }
+      await new Promise<void>(resolve => ws.end(() => resolve()));
+      fs.renameSync(tmpOut, targetPath);
+      onProgress?.(100);
+    } catch (err) {
+      await new Promise<void>(resolve => ws.end(() => resolve()));
+      fs.rmSync(tmpOut, { force: true });
+      throw err;
+    }
+  }
+
   private async listFolderFiles(
     folderId: number | null,
     onChunk?: (chunk: MappedTelegramFile[]) => void,
@@ -704,6 +938,7 @@ export class DesktopEngine {
     const out: MappedTelegramFile[] = [];
     const vaultUnlocked = this.vault.getStatus().is_unlocked;
     let offset: { id: number; date: number } | undefined;
+    let manifestCachedDirty = false;
 
     for (let page = 0; page < 5; page++) {
       const history = await this.withResolvedFolderPeer(folderId, (client, peer) =>
@@ -712,7 +947,35 @@ export class DesktopEngine {
       if (history.length === 0) break;
       const pageFiles: MappedTelegramFile[] = [];
       for (const msg of history) {
+        // Hide raw split-file parts so the user only sees one unified file
+        if (isSplitPartMessage(msg)) {
+          continue;
+        }
+
         const key = fileCompositeKey(folderId, msg.id);
+        const splitParsed = parseSplitManifestFromMessage(msg);
+        if (splitParsed) {
+          if (splitParsed.inlineManifest && !this.db.splitManifests[key]) {
+            this.db.splitManifests[key] = splitParsed.inlineManifest;
+            manifestCachedDirty = true;
+          }
+          const mappedSplit = mapSplitManifestToTelegramFile(
+            msg,
+            folderId,
+            splitParsed.header,
+            this.db.splitManifests[key] ?? splitParsed.inlineManifest ?? undefined,
+            {
+              customName: this.db.fileRenames[key],
+              favorite: this.db.favorites.includes(key),
+              encryptedRecord: this.vault.getEncryptedFileRecord(key),
+              vaultUnlocked,
+            },
+          );
+          out.push(mappedSplit);
+          pageFiles.push(mappedSplit);
+          continue;
+        }
+
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.db.fileRenames[key],
           favorite: this.db.favorites.includes(key),
@@ -733,7 +996,9 @@ export class DesktopEngine {
 
     this.filesCache.set(String(folderId ?? 'saved'), out);
     this.mtprotoStorage?.flushSync();
-    this.scheduleSave();
+    if (manifestCachedDirty || out.length >= 0) {
+      this.scheduleSave();
+    }
     return out;
   }
 
@@ -801,12 +1066,298 @@ export class DesktopEngine {
   private async deleteTelegramMessage(folderId: number | null, messageId: number): Promise<void> {
     const client = await this.ensureClient();
     const peer = folderIdToPeer(folderId);
-    await client.deleteMessagesById(peer, [messageId], { revoke: true });
     const key = fileCompositeKey(folderId, messageId);
+    const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+
+    if (splitManifest && splitManifest.parts.length > 0) {
+      const allIds = [...splitManifest.parts.map(p => p.id), messageId];
+      for (let i = 0; i < allIds.length; i += 100) {
+        await client.deleteMessagesById(peer, allIds.slice(i, i + 100), { revoke: true }).catch(() => undefined);
+      }
+    } else {
+      await client.deleteMessagesById(peer, [messageId], { revoke: true });
+    }
+
+    delete this.db.splitManifests[key];
     delete this.db.fileRenames[key];
     this.db.favorites = this.db.favorites.filter(k => k !== key);
     this.vault.removeEncryptedFile(key);
     this.scheduleSave();
+  }
+
+  private async performSplitUploadFile(params: {
+    filePath: string;
+    originalName: string;
+    originalMime: string;
+    totalSourceBytes: number;
+    folderId: number | null;
+    transferId: string;
+    isEncrypted: boolean;
+    protectionMode?: string;
+    promptToken?: number;
+    protectMetadata?: boolean;
+    signal?: AbortSignal;
+    onProgress?: (uploaded: number, total: number, speed: number) => void;
+  }): Promise<number> {
+    const client = await this.ensureClient();
+    const peer = folderIdToPeer(params.folderId);
+    const stat = fs.statSync(params.filePath);
+    const partSize = params.isEncrypted ? ENCRYPTED_SPLIT_PART_SIZE_BYTES : SPLIT_PART_SIZE_BYTES;
+    const plan = computeSplitPartPlan(params.totalSourceBytes, partSize);
+    const fingerprint = `${path.resolve(params.filePath)}|${stat.size}|${Math.floor(stat.mtimeMs)}|${params.folderId ?? 'saved'}|${params.isEncrypted ? params.protectionMode : 'plain'}`;
+
+    let checkpoint = this.db.splitUploadCheckpoints[fingerprint];
+    if (
+      !checkpoint ||
+      checkpoint.totalSize !== params.totalSourceBytes ||
+      checkpoint.partSize !== partSize
+    ) {
+      checkpoint = {
+        fingerprint,
+        groupId: nodeCrypto.randomBytes(6).toString('hex'),
+        fileName: params.originalName,
+        folderId: params.folderId,
+        totalSize: params.totalSourceBytes,
+        partSize,
+        completedParts: {},
+        updatedAt: Date.now(),
+      };
+      this.db.splitUploadCheckpoints[fingerprint] = checkpoint;
+      this.scheduleSave();
+    }
+
+    // Verify any previously completed parts on Telegram for seamless Auto-Resume
+    const completedIndices = Object.keys(checkpoint.completedParts).map(Number);
+    if (completedIndices.length > 0) {
+      const checkIds = completedIndices.map(idx => checkpoint!.completedParts[idx].messageId);
+      const aliveIds = new Set<number>();
+      for (let i = 0; i < checkIds.length; i += 100) {
+        const batch = checkIds.slice(i, i + 100);
+        const existingMsgs = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+          c.getMessages(p, batch),
+        ).catch(() => []);
+        for (const m of existingMsgs) {
+          if (m && m.media) aliveIds.add(m.id);
+        }
+      }
+      for (const idx of completedIndices) {
+        if (!aliveIds.has(checkpoint.completedParts[idx].messageId)) {
+          delete checkpoint.completedParts[idx];
+        }
+      }
+    }
+
+    const resumedPartsCount = Object.keys(checkpoint.completedParts).length;
+    this.emitEvent('split-file-notice', {
+      transferId: params.transferId,
+      fileName: params.originalName,
+      totalBytes: params.totalSourceBytes,
+      partsCount: plan.length,
+      resumedParts: resumedPartsCount,
+    });
+
+    const stagedPassphrase =
+      params.isEncrypted && params.protectionMode === 'passphrase'
+        ? this.vault.consumeStagedPassphrase(params.promptToken)
+        : null;
+    if (params.isEncrypted && params.protectionMode === 'passphrase' && !stagedPassphrase) {
+      throw new Error('PASSPHRASE_REQUIRED');
+    }
+
+    let vaultId: string | undefined;
+    const startedAt = Date.now();
+    let completedPlainBytes = plan.reduce(
+      (sum, item) => (checkpoint!.completedParts[item.index] ? sum + item.size : sum),
+      0,
+    );
+    const initialResumedBytes = completedPlainBytes;
+
+    for (const item of plan) {
+      if (params.signal?.aborted) throw new Error('CANCELLED');
+      const existingPart = checkpoint.completedParts[item.index];
+      if (existingPart) {
+        if (params.isEncrypted && !vaultId && this.vault.getStatus().vault_id) {
+          vaultId = this.vault.getStatus().vault_id ?? undefined;
+        }
+        continue;
+      }
+
+      const partFileName = buildSplitPartFileName(checkpoint.groupId, item.index, plan.length);
+      let partUploadBytes = item.size;
+      let uploadedPartFile: Awaited<ReturnType<TelegramClient['uploadFile']>>;
+
+      if (params.isEncrypted) {
+        const sliceBuf = Buffer.allocUnsafe(item.size);
+        const fd = fs.openSync(params.filePath, 'r');
+        try {
+          let readSoFar = 0;
+          while (readSoFar < item.size) {
+            const r = fs.readSync(fd, sliceBuf, readSoFar, item.size - readSoFar, item.offset + readSoFar);
+            if (r <= 0) break;
+            readSoFar += r;
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+        const enc = this.vault.encryptBuffer(new Uint8Array(sliceBuf.buffer, sliceBuf.byteOffset, item.size), {
+          mode: params.protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+          passphrase: stagedPassphrase,
+          originalName: `${params.originalName}.part${item.index + 1}`,
+          originalMime: 'application/octet-stream',
+          protectMetadata: params.protectMetadata,
+        });
+        vaultId = enc.vaultId;
+        partUploadBytes = enc.ciphertext.byteLength;
+
+        uploadedPartFile = await client.uploadFile({
+          file: enc.ciphertext,
+          fileName: partFileName,
+          fileSize: partUploadBytes,
+          fileMime: 'application/octet-stream',
+          abortSignal: params.signal,
+          progressCallback: (done, tot) => {
+            const ratio = tot > 0 ? done / tot : 0;
+            const overallDone = Math.min(
+              params.totalSourceBytes,
+              completedPlainBytes + Math.round(item.size * ratio),
+            );
+            const newlyTransferred = Math.max(0, overallDone - initialResumedBytes);
+            const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
+            const speed = Math.round(newlyTransferred / elapsedSec);
+            const pct = Math.min(99, Math.round((overallDone / params.totalSourceBytes) * 100));
+            params.onProgress?.(overallDone, params.totalSourceBytes, speed);
+            this.emitEvent('upload-progress', {
+              id: params.transferId,
+              progress: pct,
+              uploaded_bytes: overallDone,
+              total_bytes: params.totalSourceBytes,
+              speed_bytes_per_sec: speed,
+            });
+          },
+        });
+      } else {
+        const readStream = fs.createReadStream(params.filePath, {
+          start: item.offset,
+          end: item.offset + item.size - 1,
+          highWaterMark: 1024 * 1024,
+        });
+        uploadedPartFile = await client.uploadFile({
+          file: readStream,
+          fileName: partFileName,
+          fileSize: item.size,
+          fileMime: 'application/octet-stream',
+          abortSignal: params.signal,
+          progressCallback: done => {
+            const overallDone = Math.min(params.totalSourceBytes, completedPlainBytes + done);
+            const newlyTransferred = Math.max(0, overallDone - initialResumedBytes);
+            const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
+            const speed = Math.round(newlyTransferred / elapsedSec);
+            const pct = Math.min(99, Math.round((overallDone / params.totalSourceBytes) * 100));
+            params.onProgress?.(overallDone, params.totalSourceBytes, speed);
+            this.emitEvent('upload-progress', {
+              id: params.transferId,
+              progress: pct,
+              uploaded_bytes: overallDone,
+              total_bytes: params.totalSourceBytes,
+              speed_bytes_per_sec: speed,
+            });
+          },
+        });
+      }
+
+      const partCaption = buildSplitPartCaption(checkpoint.groupId, item.index, plan.length, partUploadBytes);
+      const sentPart = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+        c.sendMedia(p, {
+          type: 'document',
+          file: uploadedPartFile,
+          fileName: partFileName,
+          caption: partCaption,
+        }),
+      );
+
+      this.db.bandwidth.uploaded += partUploadBytes;
+      checkpoint.completedParts[item.index] = {
+        messageId: sentPart.id,
+        size: partUploadBytes,
+      };
+      checkpoint.updatedAt = Date.now();
+      completedPlainBytes += item.size;
+      this.flushDatabase();
+    }
+
+    const orderedParts = plan.map(item => {
+      const rec = checkpoint!.completedParts[item.index];
+      if (!rec) throw new Error(`SPLIT_PART_MISSING:${item.index}`);
+      return { id: rec.messageId, size: rec.size };
+    });
+
+    const totalStoredSize = params.isEncrypted
+      ? orderedParts.reduce((s, p) => s + p.size, 0)
+      : params.totalSourceBytes;
+
+    const manifest: SplitFileManifest = {
+      v: 1,
+      groupId: checkpoint.groupId,
+      name: params.originalName,
+      mime: params.originalMime,
+      totalSize: totalStoredSize,
+      partSize,
+      parts: orderedParts,
+      createdAt: new Date().toISOString(),
+      ...(params.isEncrypted
+        ? {
+            encrypted: {
+              mode: params.protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+              vaultId,
+              protectMetadata: Boolean(params.protectMetadata),
+            },
+          }
+        : {}),
+    };
+
+    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+    const manifestFileName = buildSplitManifestFileName(checkpoint.groupId);
+    const uploadedManifest = await client.uploadFile({
+      file: manifestBytes,
+      fileName: manifestFileName,
+      fileSize: manifestBytes.byteLength,
+      fileMime: 'application/json',
+      abortSignal: params.signal,
+    });
+
+    const sentManifest = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+      c.sendMedia(p, {
+        type: 'document',
+        file: uploadedManifest,
+        fileName: manifestFileName,
+        caption: buildSplitManifestCaption(manifest),
+      }),
+    );
+
+    const manifestKey = fileCompositeKey(params.folderId, sentManifest.id);
+    this.db.splitManifests[manifestKey] = manifest;
+    delete this.db.splitUploadCheckpoints[fingerprint];
+
+    if (params.isEncrypted) {
+      this.vault.registerEncryptedFile({
+        key: manifestKey,
+        mode: params.protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+        vaultId,
+        originalName: params.originalName,
+        originalSize: params.totalSourceBytes,
+        protectMetadata: Boolean(params.protectMetadata),
+      });
+    }
+
+    this.emitEvent('upload-progress', {
+      id: params.transferId,
+      progress: 100,
+      uploaded_bytes: params.totalSourceBytes,
+      total_bytes: params.totalSourceBytes,
+      speed_bytes_per_sec: 0,
+    });
+    this.flushDatabase();
+    return sentManifest.id;
   }
 
   private async performUploadFile(params: {
@@ -827,12 +1378,31 @@ export class DesktopEngine {
     const originalName = params.fileName || path.basename(params.filePath);
     const originalMime = guessMimeType(originalName);
 
+    const isEncrypted =
+      params.protectionMode === 'vault' || params.protectionMode === 'passphrase';
+
+    // Seamless background splitting for large files (>1.92 GiB plain, >256 MiB encrypted)
+    if (shouldSplitUpload(stat.size, isEncrypted)) {
+      return await this.performSplitUploadFile({
+        filePath: params.filePath,
+        originalName,
+        originalMime,
+        totalSourceBytes: stat.size,
+        folderId: params.folderId,
+        transferId: params.transferId,
+        isEncrypted,
+        protectionMode: params.protectionMode,
+        promptToken: params.promptToken,
+        protectMetadata: params.protectMetadata,
+        signal: params.signal,
+        onProgress: params.onProgress,
+      });
+    }
+
     let uploadSource: string | Uint8Array = params.filePath;
     let uploadName = originalName;
     let totalBytes = stat.size;
     let vaultId: string | undefined;
-    const isEncrypted =
-      params.protectionMode === 'vault' || params.protectionMode === 'passphrase';
 
     if (isEncrypted) {
       const plainBytes = new Uint8Array(fs.readFileSync(params.filePath));
@@ -871,7 +1441,6 @@ export class DesktopEngine {
       },
     });
 
-    const peer = folderIdToPeer(params.folderId);
     const isStreamableVideo =
       !isEncrypted &&
       params.videoUploadMode === 'media' &&
@@ -880,22 +1449,24 @@ export class DesktopEngine {
     const caption =
       isStreamableVideo && params.videoFilenameCaption === false ? '' : isEncrypted && params.protectMetadata ? '' : originalName;
 
-    const sent = await client.sendMedia(
-      peer,
-      isStreamableVideo
-        ? {
-            type: 'video',
-            file: uploaded,
-            fileName: uploadName,
-            supportsStreaming: true,
-            caption,
-          }
-        : {
-            type: 'document',
-            file: uploaded,
-            fileName: uploadName,
-            caption,
-          },
+    const sent = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+      c.sendMedia(
+        p,
+        isStreamableVideo
+          ? {
+              type: 'video',
+              file: uploaded,
+              fileName: uploadName,
+              supportsStreaming: true,
+              caption,
+            }
+          : {
+              type: 'document',
+              file: uploaded,
+              fileName: uploadName,
+              caption,
+            },
+      ),
     );
 
     this.db.bandwidth.uploaded += totalBytes;
@@ -940,9 +1511,63 @@ export class DesktopEngine {
     fs.mkdirSync(path.dirname(resolved.finalPath), { recursive: true });
     const key = fileCompositeKey(params.folderId, params.messageId);
     const encRec = this.vault.getEncryptedFileRecord(key);
+    const splitManifest = await this.ensureSplitManifestLoaded(params.folderId, params.messageId).catch(() => null);
     const startedAt = Date.now();
+    const tmpDest = `${resolved.finalPath}.tdpart`;
 
-    if (encRec) {
+    const writeWithDrain = async (ws: fs.WriteStream, buf: Uint8Array) => {
+      if (!ws.write(Buffer.from(buf))) {
+        await new Promise<void>(r => ws.once('drain', r));
+      }
+    };
+
+    if (splitManifest && (splitManifest.encrypted || encRec)) {
+      // Encrypted split file: decrypt each part sequentially into tmpDest (low RAM)
+      const stagedPass =
+        (splitManifest.encrypted?.mode ?? encRec?.mode) === 'passphrase'
+          ? this.vault.consumeStagedPassphrase(params.promptToken)
+          : null;
+      const totalCipherBytes = splitManifest.parts.reduce((s, p) => s + p.size, 0);
+      let downloadedCipher = 0;
+      const ws = fs.createWriteStream(tmpDest);
+      try {
+        for (const part of splitManifest.parts) {
+          if (params.signal?.aborted) throw new Error('CANCELLED');
+          const rawPart = await this.downloadRawTelegramBytes(
+            params.folderId,
+            part.id,
+            partDone => {
+              const cur = downloadedCipher + partDone;
+              const elapsed = Math.max(0.1, (Date.now() - startedAt) / 1000);
+              const speed = Math.round(cur / elapsed);
+              const pct = totalCipherBytes > 0 ? Math.min(98, Math.round((cur / totalCipherBytes) * 98)) : 0;
+              params.onProgress?.(cur, totalCipherBytes, speed);
+              this.emitEvent('download-progress', {
+                id: params.transferId,
+                message_id: params.messageId,
+                progress: pct,
+                downloaded_bytes: cur,
+                total_bytes: totalCipherBytes,
+                speed_bytes_per_sec: speed,
+              });
+            },
+            params.signal,
+          );
+          downloadedCipher += rawPart.byteLength;
+          const plainPart = this.vault.decryptBuffer(rawPart, {
+            promptToken: params.promptToken,
+            passphrase: stagedPass,
+          }).plaintext;
+          await writeWithDrain(ws, plainPart);
+        }
+        await new Promise<void>(r => ws.end(() => r()));
+        fs.renameSync(tmpDest, resolved.finalPath);
+      } catch (err) {
+        await new Promise<void>(r => ws.end(() => r()));
+        fs.rmSync(tmpDest, { force: true });
+        throw err;
+      }
+    } else if (encRec) {
       const rawBytes = await this.downloadRawTelegramBytes(
         params.folderId,
         params.messageId,
@@ -965,57 +1590,116 @@ export class DesktopEngine {
       const { plaintext } = this.vault.decryptBuffer(rawBytes, { promptToken: params.promptToken });
       fs.writeFileSync(resolved.finalPath, Buffer.from(plaintext));
     } else {
-      const msg = await this.fetchSingleMessage(params.folderId, params.messageId);
-      if (!msg.media) throw new Error('MEDIA_NOT_FOUND');
-      const total = ((msg.media as unknown as { fileSize?: number }).fileSize ?? 0);
-      const client = await this.ensureClient();
-      const tmpDest = `${resolved.finalPath}.part`;
-      const stream = fs.createWriteStream(tmpDest);
-      let done = 0;
+      // Plain file (single OR multi-part split of any size, e.g. 4 GB – 100 GB):
+      // Supports 1 MiB-aligned Auto-Resume from .tdpart if interrupted by network drop or pause!
+      let total = 0;
+      if (splitManifest) {
+        total = splitManifest.totalSize;
+      } else {
+        const msg = await this.fetchSingleMessage(params.folderId, params.messageId);
+        if (!msg.media) throw new Error('MEDIA_NOT_FOUND');
+        total = ((msg.media as unknown as { fileSize?: number }).fileSize ?? 0);
+      }
+
+      const resumeUnit = 1024 * 1024; // 1 MiB alignment
+      let resumeOffset = 0;
+      if (fs.existsSync(tmpDest) && total > resumeUnit) {
+        try {
+          const existingBytes = fs.statSync(tmpDest).size;
+          const aligned = Math.floor(existingBytes / resumeUnit) * resumeUnit;
+          if (aligned > 0 && aligned < total) {
+            if (existingBytes !== aligned) {
+              fs.truncateSync(tmpDest, aligned);
+            }
+            resumeOffset = aligned;
+          } else if (existingBytes >= total) {
+            fs.rmSync(tmpDest, { force: true });
+          }
+        } catch {
+          resumeOffset = 0;
+        }
+      }
+
+      const stream = fs.createWriteStream(tmpDest, {
+        flags: resumeOffset > 0 ? 'a' : 'w',
+      });
+      let done = resumeOffset;
+      const abortSig = params.signal ?? new AbortController().signal;
 
       try {
-        for await (const chunk of client.downloadAsIterable(
-          msg.media as Parameters<TelegramClient['downloadAsIterable']>[0],
-          { partSize: 512, abortSignal: params.signal },
-        )) {
-          if (params.signal?.aborted) throw new Error('CANCELLED');
-          stream.write(Buffer.from(chunk));
-          done += chunk.byteLength;
-          this.db.bandwidth.downloaded += chunk.byteLength;
-          const elapsed = Math.max(0.1, (Date.now() - startedAt) / 1000);
-          const speed = Math.round(done / elapsed);
-          const pct = total > 0 ? Math.min(99, Math.round((done / total) * 100)) : 0;
-          params.onProgress?.(done, total || done, speed);
-          this.emitEvent('download-progress', {
-            id: params.transferId,
-            message_id: params.messageId,
-            progress: pct,
-            downloaded_bytes: done,
-            total_bytes: total || done,
-            speed_bytes_per_sec: speed,
-          });
+        if (total > 0 && resumeOffset < total) {
+          for await (const chunk of this.streamFileRange(
+            params.folderId,
+            params.messageId,
+            resumeOffset,
+            total - 1,
+            abortSig,
+          )) {
+            if (abortSig.aborted) throw new Error('CANCELLED');
+            await writeWithDrain(stream, chunk);
+            done += chunk.byteLength;
+            const newlyDownloaded = Math.max(0, done - resumeOffset);
+            const elapsed = Math.max(0.1, (Date.now() - startedAt) / 1000);
+            const speed = Math.round(newlyDownloaded / elapsed);
+            const pct = total > 0 ? Math.min(99, Math.round((done / total) * 100)) : 0;
+            params.onProgress?.(done, total, speed);
+            this.emitEvent('download-progress', {
+              id: params.transferId,
+              message_id: params.messageId,
+              progress: pct,
+              downloaded_bytes: done,
+              total_bytes: total,
+              speed_bytes_per_sec: speed,
+            });
+          }
+        } else if (total === 0) {
+          const msg = await this.fetchSingleMessage(params.folderId, params.messageId);
+          if (!msg.media) throw new Error('MEDIA_NOT_FOUND');
+          const client = await this.ensureClient();
+          for await (const chunk of client.downloadAsIterable(
+            msg.media as Parameters<TelegramClient['downloadAsIterable']>[0],
+            { partSize: 512, abortSignal: abortSig },
+          )) {
+            if (abortSig.aborted) throw new Error('CANCELLED');
+            await writeWithDrain(stream, chunk);
+            done += chunk.byteLength;
+            this.db.bandwidth.downloaded += chunk.byteLength;
+          }
         }
       } catch (err) {
         await new Promise<void>(r => stream.end(() => r()));
-        fs.rmSync(tmpDest, { force: true });
+        if (this.explicitlyCancelledTransfers.has(params.transferId)) {
+          this.explicitlyCancelledTransfers.delete(params.transferId);
+          fs.rmSync(tmpDest, { force: true });
+        }
         throw err;
       }
 
       await new Promise<void>(r => stream.end(() => r()));
-      if (VaultRuntime.hasEncryptedMagic(fs.readFileSync(tmpDest, { flag: 'r' }).subarray(0, 16))) {
-        const cipherBytes = new Uint8Array(fs.readFileSync(tmpDest));
-        const { plaintext } = this.vault.decryptBuffer(cipherBytes, { promptToken: params.promptToken });
-        fs.writeFileSync(tmpDest, Buffer.from(plaintext));
+      if (!splitManifest && fs.existsSync(tmpDest) && fs.statSync(tmpDest).size >= 16) {
+        const headBuf = Buffer.alloc(16);
+        const fd = fs.openSync(tmpDest, 'r');
+        try {
+          fs.readSync(fd, headBuf, 0, 16, 0);
+        } finally {
+          fs.closeSync(fd);
+        }
+        if (VaultRuntime.hasEncryptedMagic(headBuf)) {
+          const cipherBytes = new Uint8Array(fs.readFileSync(tmpDest));
+          const { plaintext } = this.vault.decryptBuffer(cipherBytes, { promptToken: params.promptToken });
+          fs.writeFileSync(tmpDest, Buffer.from(plaintext));
+        }
       }
       fs.renameSync(tmpDest, resolved.finalPath);
     }
 
+    const finalBytes = fs.existsSync(resolved.finalPath) ? fs.statSync(resolved.finalPath).size : 1;
     this.emitEvent('download-progress', {
       id: params.transferId,
       message_id: params.messageId,
       progress: 100,
-      downloaded_bytes: 1,
-      total_bytes: 1,
+      downloaded_bytes: finalBytes,
+      total_bytes: finalBytes,
       speed_bytes_per_sec: 0,
     });
     this.scheduleSave();
@@ -1034,8 +1718,10 @@ export class DesktopEngine {
     let freeUploads = Math.max(0, this.maxConcurrentUploads - activeUploads);
     let freeDownloads = Math.max(0, this.maxConcurrentDownloads - activeDownloads);
 
+    const now = Date.now();
     for (const job of jobs) {
       if (job.status !== 'pending') continue;
+      if (job.retryAt && job.retryAt > now) continue;
       if (job.direction === 'upload' && freeUploads > 0) {
         freeUploads--;
         void this.executeQueuedTransfer(job);
@@ -1155,6 +1841,31 @@ export class DesktopEngine {
           errorCategory: 'unlock',
           speedBytesPerSec: 0,
         });
+      } else if (isTransientTransferNetworkError(err)) {
+        const prevAttempts = Number((job as unknown as { _autoRetries?: number })._autoRetries ?? 0);
+        if (prevAttempts < 5) {
+          (job as unknown as { _autoRetries?: number })._autoRetries = prevAttempts + 1;
+          const delayMs = Math.min(20_000, 2000 * 2 ** prevAttempts);
+          this.updateTransferJob(job, {
+            status: 'pending',
+            error: `Network interrupted — auto-resuming in ${Math.round(delayMs / 1000)}s…`,
+            errorCategory: 'network',
+            retryAt: Date.now() + delayMs,
+            speedBytesPerSec: 0,
+          });
+          setTimeout(() => {
+            if (job.status === 'pending') {
+              this.pumpTransferQueue();
+            }
+          }, delayMs);
+        } else {
+          this.updateTransferJob(job, {
+            status: 'failed',
+            error: msg,
+            errorCategory: 'network',
+            speedBytesPerSec: 0,
+          });
+        }
       } else {
         this.updateTransferJob(job, {
           status: 'failed',
@@ -1278,6 +1989,7 @@ export class DesktopEngine {
         return readEncryptedSecretFile(this.apiHashFilePath);
       case 'cmd_clear_api_hash':
         fs.rmSync(this.apiHashFilePath, { force: true });
+        removeResilientBackupsSync(this.apiHashFilePath);
         this.currentApiHash = null;
         return null;
 
@@ -1558,6 +2270,7 @@ export class DesktopEngine {
         this.vault.lock();
         this.mtprotoStorage?.clearDisk();
         fs.rmSync(this.sessionFilePath, { force: true });
+        removeResilientBackupsSync(this.sessionFilePath);
         this.flushDatabase();
         return { signed_out: true, remote_session_revoked: remoteRevoked };
       }
@@ -1840,25 +2553,100 @@ export class DesktopEngine {
             : Number(args.targetFolderId);
         const messageIds = (args.messageIds as number[]) ?? [];
         const client = await this.ensureClient();
-        const forwarded = await client.forwardMessagesById({
-          fromChatId: folderIdToPeer(sourceFolderId),
-          toChatId: folderIdToPeer(targetFolderId),
-          messages: messageIds,
-          noAuthor: true,
-        });
-        for (let i = 0; i < messageIds.length; i++) {
-          const oldKey = fileCompositeKey(sourceFolderId, messageIds[i]);
-          const newMsg = forwarded[i];
-          if (newMsg) {
-            const newKey = fileCompositeKey(targetFolderId, newMsg.id);
+        const plainIds: number[] = [];
+
+        for (const msgId of messageIds) {
+          const splitManifest = await this.ensureSplitManifestLoaded(sourceFolderId, msgId).catch(() => null);
+          if (!splitManifest) {
+            plainIds.push(msgId);
+            continue;
+          }
+
+          // Move all split parts in order, then upload updated manifest in target folder
+          const oldPartIds = splitManifest.parts.map(p => p.id);
+          const newPartIds: number[] = [];
+          for (let offset = 0; offset < oldPartIds.length; offset += 80) {
+            const batch = oldPartIds.slice(offset, offset + 80);
+            const fwdBatch = await client.forwardMessagesById({
+              fromChatId: folderIdToPeer(sourceFolderId),
+              toChatId: folderIdToPeer(targetFolderId),
+              messages: batch,
+              noAuthor: true,
+            });
+            for (const m of fwdBatch) {
+              if (m) newPartIds.push(m.id);
+            }
+          }
+
+          if (newPartIds.length === splitManifest.parts.length) {
+            const updatedManifest: SplitFileManifest = {
+              ...splitManifest,
+              parts: splitManifest.parts.map((p, idx) => ({ id: newPartIds[idx], size: p.size })),
+            };
+            const manifestBytes = new TextEncoder().encode(JSON.stringify(updatedManifest));
+            const manifestFileName = buildSplitManifestFileName(updatedManifest.groupId);
+            const uploadedManifest = await client.uploadFile({
+              file: manifestBytes,
+              fileName: manifestFileName,
+              fileSize: manifestBytes.byteLength,
+              fileMime: 'application/json',
+            });
+            const sentNewManifest = await this.withResolvedFolderPeer(targetFolderId, (c, p) =>
+              c.sendMedia(p, {
+                type: 'document',
+                file: uploadedManifest,
+                fileName: manifestFileName,
+                caption: buildSplitManifestCaption(updatedManifest),
+              }),
+            );
+
+            const oldKey = fileCompositeKey(sourceFolderId, msgId);
+            const newKey = fileCompositeKey(targetFolderId, sentNewManifest.id);
+            this.db.splitManifests[newKey] = updatedManifest;
+            delete this.db.splitManifests[oldKey];
+
             const enc = this.vault.getEncryptedFileRecord(oldKey);
-            if (enc) this.vault.registerEncryptedFile({ ...enc, key: newKey });
+            if (enc) {
+              this.vault.registerEncryptedFile({ ...enc, key: newKey });
+              this.vault.removeEncryptedFile(oldKey);
+            }
             if (this.db.fileRenames[oldKey]) {
               this.db.fileRenames[newKey] = this.db.fileRenames[oldKey];
+              delete this.db.fileRenames[oldKey];
+            }
+
+            const deleteAllOld = [...oldPartIds, msgId];
+            for (let offset = 0; offset < deleteAllOld.length; offset += 100) {
+              await client
+                .deleteMessagesById(folderIdToPeer(sourceFolderId), deleteAllOld.slice(offset, offset + 100), {
+                  revoke: true,
+                })
+                .catch(() => undefined);
             }
           }
         }
-        await client.deleteMessagesById(folderIdToPeer(sourceFolderId), messageIds, { revoke: true });
+
+        if (plainIds.length > 0) {
+          const forwarded = await client.forwardMessagesById({
+            fromChatId: folderIdToPeer(sourceFolderId),
+            toChatId: folderIdToPeer(targetFolderId),
+            messages: plainIds,
+            noAuthor: true,
+          });
+          for (let i = 0; i < plainIds.length; i++) {
+            const oldKey = fileCompositeKey(sourceFolderId, plainIds[i]);
+            const newMsg = forwarded[i];
+            if (newMsg) {
+              const newKey = fileCompositeKey(targetFolderId, newMsg.id);
+              const enc = this.vault.getEncryptedFileRecord(oldKey);
+              if (enc) this.vault.registerEncryptedFile({ ...enc, key: newKey });
+              if (this.db.fileRenames[oldKey]) {
+                this.db.fileRenames[newKey] = this.db.fileRenames[oldKey];
+              }
+            }
+          }
+          await client.deleteMessagesById(folderIdToPeer(sourceFolderId), plainIds, { revoke: true });
+        }
         this.scheduleSave();
         return null;
       }
@@ -1908,34 +2696,44 @@ export class DesktopEngine {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
         const messageId = Number(args.messageId);
-        const msg = await this.fetchSingleMessage(folderId, messageId);
         const key = fileCompositeKey(folderId, messageId);
-        const mapped = mapMessageToTelegramFile(msg, folderId, {
-          customName: this.db.fileRenames[key],
-          encryptedRecord: this.vault.getEncryptedFileRecord(key),
-        });
-        const ext = path.extname(mapped?.name ?? '') || '.bin';
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        let resolvedName = '';
+        let totalSize = 0;
+        if (splitManifest) {
+          resolvedName = this.db.fileRenames[key] || splitManifest.name;
+          totalSize = splitManifest.totalSize;
+        } else {
+          const msg = await this.fetchSingleMessage(folderId, messageId);
+          const mapped = mapMessageToTelegramFile(msg, folderId, {
+            customName: this.db.fileRenames[key],
+            encryptedRecord: this.vault.getEncryptedFileRecord(key),
+          });
+          resolvedName = mapped?.name ?? '';
+          totalSize = mapped?.size ?? 0;
+        }
+        const ext = path.extname(resolvedName) || '.bin';
         const previewPath = path.join(
           getPortablePaths().previewsCacheDir,
           `preview_${folderId ?? 'saved'}_${messageId}${ext}`,
         );
         if (fs.existsSync(previewPath)) return previewPath;
 
-        const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId, (done, total) => {
-          this.emitEvent('preview-progress', {
-            folder_id: folderId,
-            message_id: messageId,
-            downloaded_bytes: done,
-            total_bytes: total,
-            percent: total > 0 ? Math.min(99, Math.round((done / total) * 99)) : 0,
-          });
-        });
-        const plain = VaultRuntime.hasEncryptedMagic(rawBytes)
-          ? this.vault.decryptBuffer(rawBytes, {
-              promptToken: typeof args.promptToken === 'number' ? args.promptToken : undefined,
-            }).plaintext
-          : rawBytes;
-        fs.writeFileSync(previewPath, Buffer.from(plain));
+        await this.streamFullFileToDisk(
+          folderId,
+          messageId,
+          previewPath,
+          pct => {
+            this.emitEvent('preview-progress', {
+              folder_id: folderId,
+              message_id: messageId,
+              downloaded_bytes: Math.round((pct / 100) * totalSize),
+              total_bytes: totalSize,
+              percent: Math.min(99, pct),
+            });
+          },
+          typeof args.promptToken === 'number' ? args.promptToken : undefined,
+        );
         return previewPath;
       }
 
@@ -2055,9 +2853,10 @@ export class DesktopEngine {
               ? null
               : Number(args.folderId)
             : Number(req.folder_id);
-        const transferId = String(req.id ?? args.id ?? `up_${Date.now()}`);
+        const transferId = String(req.id ?? args.id ?? args.transferId ?? `up_${Date.now()}`);
         const abort = new AbortController();
         this.activeAbortControllers.set(transferId, abort);
+        this.directActiveDirections.set(transferId, 'upload');
         try {
           return await this.performUploadFile({
             filePath,
@@ -2072,6 +2871,7 @@ export class DesktopEngine {
           });
         } finally {
           this.activeAbortControllers.delete(transferId);
+          this.directActiveDirections.delete(transferId);
         }
       }
 
@@ -2090,15 +2890,18 @@ export class DesktopEngine {
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const tmpFile = path.join(getPortablePaths().stagingCacheDir, `${Date.now()}_${filename}`);
         fs.writeFileSync(tmpFile, Buffer.from(await resp.arrayBuffer()));
+        const transferId = String(req.id ?? args.id ?? args.transferId ?? `url_${Date.now()}`);
+        this.directActiveDirections.set(transferId, 'upload');
         try {
           return await this.performUploadFile({
             filePath: tmpFile,
             fileName: filename,
             folderId:
               req.folder_id === null || req.folder_id === undefined ? null : Number(req.folder_id),
-            transferId: String(req.id ?? args.id ?? `url_${Date.now()}`),
+            transferId,
           });
         } finally {
+          this.directActiveDirections.delete(transferId);
           fs.rmSync(tmpFile, { force: true });
         }
       }
@@ -2113,9 +2916,10 @@ export class DesktopEngine {
               ? null
               : Number(args.folderId)
             : Number(req.folder_id);
-        const transferId = String(req.id ?? args.id ?? `dl_${messageId}`);
+        const transferId = String(req.id ?? args.id ?? args.transferId ?? `dl_${messageId}`);
         const abort = new AbortController();
         this.activeAbortControllers.set(transferId, abort);
+        this.directActiveDirections.set(transferId, 'download');
         try {
           return await this.performDownloadFile({
             folderId,
@@ -2132,11 +2936,13 @@ export class DesktopEngine {
           });
         } finally {
           this.activeAbortControllers.delete(transferId);
+          this.directActiveDirections.delete(transferId);
         }
       }
 
       case 'cmd_cancel_transfer': {
         const id = String(args.transferId ?? args.id ?? '');
+        this.explicitlyCancelledTransfers.add(id);
         this.activeAbortControllers.get(id)?.abort();
         const job = this.transfers.get(id);
         if (job) this.updateTransferJob(job, { status: 'cancelled', speedBytesPerSec: 0 });
@@ -2212,7 +3018,8 @@ export class DesktopEngine {
       case 'cmd_transfer_retry': {
         const job = this.transfers.get(String(args.id));
         if (!job) throw new Error('TRANSFER_NOT_FOUND');
-        this.updateTransferJob(job, { status: 'pending', error: undefined });
+        (job as unknown as { _autoRetries?: number })._autoRetries = 0;
+        this.updateTransferJob(job, { status: 'pending', error: undefined, retryAt: undefined });
         this.pumpTransferQueue();
         return job;
       }
@@ -2220,6 +3027,7 @@ export class DesktopEngine {
       case 'cmd_transfer_cancel': {
         const job = this.transfers.get(String(args.id));
         if (!job) throw new Error('TRANSFER_NOT_FOUND');
+        this.explicitlyCancelledTransfers.add(job.id);
         this.updateTransferJob(job, { status: 'cancelled', speedBytesPerSec: 0 });
         this.activeAbortControllers.get(job.id)?.abort();
         return job;
@@ -2237,9 +3045,11 @@ export class DesktopEngine {
             this.activeAbortControllers.get(job.id)?.abort();
             affected.push(job);
           } else if (cmd === 'cmd_transfer_resume_all' && job.status === 'paused') {
-            this.updateTransferJob(job, { status: 'pending' });
+            (job as unknown as { _autoRetries?: number })._autoRetries = 0;
+            this.updateTransferJob(job, { status: 'pending', retryAt: undefined });
             affected.push(job);
           } else if (cmd === 'cmd_transfer_cancel_all' && !['completed', 'cancelled'].includes(job.status)) {
+            this.explicitlyCancelledTransfers.add(job.id);
             this.updateTransferJob(job, { status: 'cancelled', speedBytesPerSec: 0 });
             this.activeAbortControllers.get(job.id)?.abort();
             affected.push(job);
@@ -2608,28 +3418,51 @@ export class DesktopEngine {
       case 'cmd_get_transcode_capabilities':
         return this.transcoder.getCapabilities(this.db.transcodeCacheMaxGb);
 
+      case 'cmd_get_ffmpeg_status': {
+        if (args.forceRefresh) {
+          resetFfmpegDetectionCache();
+        }
+        return {
+          ...resolveFfmpegDetails(),
+          installState: getFfmpegInstallState(),
+        };
+      }
+
+      case 'cmd_install_ffmpeg': {
+        const details = await installPortableFfmpeg(payload => {
+          this.emitEvent('ffmpeg-install-progress', payload);
+        });
+        return {
+          ...details,
+          capabilities: this.transcoder.getCapabilities(this.db.transcodeCacheMaxGb),
+        };
+      }
+
+      case 'cmd_cancel_ffmpeg_install':
+        cancelPortableFfmpegInstall();
+        return null;
+
       case 'cmd_prepare_transcoded_stream': {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
         const messageId = Number(args.messageId);
         const quality = String(args.quality ?? '720p');
         const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+        const key = fileCompositeKey(folderId, messageId);
+        const encRec = this.vault.getEncryptedFileRecord(key);
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        const isEnc = Boolean(encRec || splitManifest?.encrypted);
+        const folderSeg = folderId === null ? 'home' : String(folderId);
+        const directInputUrl = !isEnc
+          ? `http://127.0.0.1:${this.servers.mediaPort}/stream/${folderSeg}/${messageId}?token=${encodeURIComponent(this.servers.streamToken)}`
+          : undefined;
 
         return await this.transcoder.prepareTranscode({
           fileKey,
           quality,
+          directInputUrl,
           ensureSourceCached: async (targetPath, onProgress) => {
-            const key = fileCompositeKey(folderId, messageId);
-            const encRec = this.vault.getEncryptedFileRecord(key);
-            const rawBytes = await this.downloadRawTelegramBytes(
-              folderId,
-              messageId,
-              (done, total) => {
-                if (total > 0) onProgress(Math.round((done / total) * 100));
-              },
-            );
-            const finalBytes = encRec ? this.vault.decryptBuffer(rawBytes).plaintext : rawBytes;
-            atomicWriteFileSync(targetPath, Buffer.from(finalBytes));
+            await this.streamFullFileToDisk(folderId, messageId, targetPath, onProgress);
           },
         });
       }
@@ -2650,14 +3483,20 @@ export class DesktopEngine {
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
         const messageId = Number(args.messageId);
         const fileKey = this.transcoder.makeFileKey(this.currentUserId, folderId, messageId);
+        const key = fileCompositeKey(folderId, messageId);
+        const encRec = this.vault.getEncryptedFileRecord(key);
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        const isEnc = Boolean(encRec || splitManifest?.encrypted);
+        const folderSeg = folderId === null ? 'home' : String(folderId);
+        const directInputUrl = !isEnc
+          ? `http://127.0.0.1:${this.servers.mediaPort}/stream/${folderSeg}/${messageId}?token=${encodeURIComponent(this.servers.streamToken)}`
+          : undefined;
+
         return await this.transcoder.prepareFmp4Remux({
           fileKey,
+          directInputUrl,
           ensureSourceCached: async targetPath => {
-            const key = fileCompositeKey(folderId, messageId);
-            const encRec = this.vault.getEncryptedFileRecord(key);
-            const rawBytes = await this.downloadRawTelegramBytes(folderId, messageId);
-            const finalBytes = encRec ? this.vault.decryptBuffer(rawBytes).plaintext : rawBytes;
-            atomicWriteFileSync(targetPath, Buffer.from(finalBytes));
+            await this.streamFullFileToDisk(folderId, messageId, targetPath);
           },
         });
       }
@@ -3460,6 +4299,10 @@ export class DesktopEngine {
           String(args.downloadUrl ?? ''),
           String(args.assetName ?? 'Telegram-Drive-portable-setup.exe'),
           percent => this.emitEvent('update-download-progress', { progress: percent }),
+          async () => {
+            await this.shutdown();
+            this.lifecycleHooks.flushStoresSync?.();
+          },
         );
         return true;
       }

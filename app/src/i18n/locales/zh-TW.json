@@ -429,7 +429,17 @@
     "hide_passphrase": "隱藏密碼片語",
     "current_vault_passphrase": "目前保險庫通行片語",
     "videoFilenameCaption": "檔案名稱說明",
-    "videoFilenameCaptionDesc": "將原始檔案名稱加入影片訊息說明中。加密上傳會保護檔案名稱隱私。"
+    "videoFilenameCaptionDesc": "將原始檔案名稱加入影片訊息說明中。加密上傳會保護檔案名稱隱私。",
+    "ffmpeg_install_in_app": "在應用程式內安裝 FFmpeg",
+    "ffmpeg_installing": "正在安裝 FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "正在將 FFmpeg 解壓縮至 data/bin…",
+    "ffmpeg_installed_ready": "已偵測到 FFmpeg 且準備就緒",
+    "ffmpeg_install_success": "FFmpeg 已安裝於 data/bin 資料夾並可立即使用。",
+    "data_saver_mode": "數據節省模式",
+    "data_saver_desc": "略過背景縮圖預先載入並限制媒體預讀緩衝，以節省行動數據。",
+    "notice_split_file": "大型檔案 ({{name}}) 正自動分為 {{count}} 個部分處理——在資料夾中仍會顯示為單一檔案。",
+    "notice_ultra_low_ram": "偵測到低記憶體手機：大型檔案已啟用記憶體安全分段串流，高負載多工時可能會有輕微緩衝。",
+    "notice_mobile_data_large": "正在使用行動數據處理大型檔案 ({{size}})。可隨時在設定中開啟「數據節省模式」以減少額外流量。"
   },
   "files": {
     "download": "下載",

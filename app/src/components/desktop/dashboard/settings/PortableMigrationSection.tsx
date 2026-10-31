@@ -46,6 +46,7 @@ interface RelocatePortableResult {
   mode: 'copy' | 'move';
   copiedBytes: number;
   fileCount: number;
+  updatedShortcuts?: number;
 }
 
 interface PortableBundleImportResult {
@@ -389,6 +390,9 @@ export function PortableMigrationSection() {
                 </p>
                 <p className="text-[11px] text-app-text-secondary mt-0.5">
                   Transferred {relocated.fileCount} files ({formatBytes(relocated.copiedBytes)}) with verified session & workspace integrity.
+                  {relocated.updatedShortcuts && relocated.updatedShortcuts > 0
+                    ? ` Updated ${relocated.updatedShortcuts} Desktop / Start Menu shortcut${relocated.updatedShortcuts === 1 ? '' : 's'} automatically.`
+                    : ''}
                 </p>
               </div>
             </div>

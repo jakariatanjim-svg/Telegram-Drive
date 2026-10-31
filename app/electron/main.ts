@@ -17,7 +17,7 @@ import {
   shell,
 } from 'electron';
 import { DesktopEngine } from './engine';
-import { atomicWriteFileSync } from './mtprotoNode';
+import { atomicWriteFileSync, readResilientJsonFile } from './mtprotoNode';
 import { initPortablePaths } from './portablePaths';
 
 // CRITICAL PORTABLE REQUIREMENT:
@@ -50,6 +50,8 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let programmaticQuit = false;
+let quitConfirmedByUser = false;
 let shutdownComplete = false;
 let shutdownPromise: Promise<void> | null = null;
 const storeCache = new Map<string, Record<string, unknown>>();
@@ -101,16 +103,40 @@ function readJsonStore(storeName: string): Record<string, unknown> {
     return storeCache.get(safeName)!;
   }
   const filePath = path.join(portablePaths.storesDir, safeName);
-  let loaded: Record<string, unknown> = {};
-  if (fs.existsSync(filePath)) {
-    try {
-      loaded = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
-    } catch {
-      loaded = {};
-    }
-  }
+  const loaded = readResilientJsonFile<Record<string, unknown>>(filePath) ?? {};
   storeCache.set(safeName, loaded);
   return loaded;
+}
+
+function confirmQuitIfTransfersActive(): boolean {
+  if (programmaticQuit || quitConfirmedByUser) return true;
+  const summary = engine.getActiveTransferSummary();
+  if (summary.totalActive <= 0) return true;
+
+  const parts: string[] = [];
+  if (summary.activeUploads > 0) {
+    parts.push(`${summary.activeUploads} upload${summary.activeUploads > 1 ? 's' : ''}`);
+  }
+  if (summary.activeDownloads > 0) {
+    parts.push(`${summary.activeDownloads} download${summary.activeDownloads > 1 ? 's' : ''}`);
+  }
+
+  const choice = dialog.showMessageBoxSync(mainWindow ?? undefined as unknown as BrowserWindow, {
+    type: 'warning',
+    buttons: ['Keep Running', 'Quit Anyway'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: 'Active Transfers — Telegram Drive',
+    message: 'File transfers are still in progress.',
+    detail: `${parts.join(' and ')} currently running. Quitting now will interrupt active transfers (completed parts of large files are saved for auto-resume).`,
+  });
+
+  if (choice === 1) {
+    quitConfirmedByUser = true;
+    return true;
+  }
+  return false;
 }
 
 function saveJsonStore(storeName: string): void {
@@ -138,6 +164,7 @@ engine.setLifecycleHooks({
   flushStoresSync: flushAllStoresSync,
   reloadStoresSync: reloadAllStoresSync,
   triggerAppQuit: () => {
+    programmaticQuit = true;
     isQuitting = true;
     app.quit();
   },
@@ -180,6 +207,7 @@ function setupTray(): void {
     {
       label: 'Quit Telegram Drive',
       click: () => {
+        if (!confirmQuitIfTransfersActive()) return;
         isQuitting = true;
         app.quit();
       },
@@ -229,7 +257,13 @@ function createMainWindow(): void {
     if (prefs.backgroundModeEnabled !== false && prefs.closeBehavior === 'background') {
       event.preventDefault();
       mainWindow?.hide();
+      return;
     }
+    if (!confirmQuitIfTransfersActive()) {
+      event.preventDefault();
+      return;
+    }
+    isQuitting = true;
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -475,6 +509,7 @@ void app.whenReady().then(async () => {
   });
 
   powerMonitor.on('shutdown', () => {
+    programmaticQuit = true;
     isQuitting = true;
     engine.flushSync();
     try {
@@ -490,6 +525,7 @@ void app.whenReady().then(async () => {
 
 // Windows emits 'session-end' when the user restarts, shuts down, or signs out of Windows.
 (app as unknown as NodeJS.EventEmitter).on('session-end', () => {
+  programmaticQuit = true;
   isQuitting = true;
   engine.flushSync();
   try {
@@ -499,7 +535,12 @@ void app.whenReady().then(async () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+  if (!confirmQuitIfTransfersActive()) {
+    event.preventDefault();
+    isQuitting = false;
+    return;
+  }
   isQuitting = true;
   engine.flushSync();
 });

@@ -429,7 +429,17 @@
     "hide_passphrase": "Passphrase verbergen",
     "current_vault_passphrase": "Aktuelle Tresor-Passphrase",
     "videoFilenameCaption": "Dateinamen als Bildunterschrift",
-    "videoFilenameCaptionDesc": "Den ursprünglichen Dateinamen zu Videonachrichten hinzufügen. Bei verschlüsselten Uploads bleibt er privat."
+    "videoFilenameCaptionDesc": "Den ursprünglichen Dateinamen zu Videonachrichten hinzufügen. Bei verschlüsselten Uploads bleibt er privat.",
+    "ffmpeg_install_in_app": "FFmpeg in der App installieren",
+    "ffmpeg_installing": "FFmpeg wird installiert ({{percent}}%)…",
+    "ffmpeg_extracting": "FFmpeg wird nach data/bin entpackt…",
+    "ffmpeg_installed_ready": "FFmpeg erkannt und bereit",
+    "ffmpeg_install_success": "FFmpeg wurde in data/bin installiert und ist einsatzbereit.",
+    "data_saver_mode": "Datensparmodus",
+    "data_saver_desc": "Überspringt das Vorladen von Vorschaubildern im Hintergrund und begrenzt den Medienpuffer, um mobile Daten zu sparen.",
+    "notice_split_file": "Große Datei ({{name}}) wird automatisch in {{count}} Teilen verarbeitet — sie wird als einzelne Datei angezeigt.",
+    "notice_ultra_low_ram": "Gerät mit wenig RAM erkannt: Große Dateien nutzen speicherschonendes Chunk-Streaming; bei starkem Multitasking kann kurzes Puffern auftreten.",
+    "notice_mobile_data_large": "Mobile Daten werden für eine große Datei ({{size}}) verwendet. Aktivieren Sie den Datensparmodus in den Einstellungen, um Daten zu sparen."
   },
   "files": {
     "download": "Herunterladen",

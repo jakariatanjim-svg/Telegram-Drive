@@ -39,6 +39,7 @@ interface StreamInfo {
 export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }: MobileMediaPlayerProps) {
   const { t } = useTranslation();
   const [localPath, setLocalPath] = useState<string | null>(null);
+  const [directStreamUrl, setDirectStreamUrl] = useState<string | null>(null);
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -51,6 +52,9 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
   useModalFocus(panelRef, onClose);
   const isVideo = isVideoFile(file.name, file.mime_type);
   const isAudio = isAudioFile(file.name, file.mime_type);
+  const isFileEncrypted = Boolean(
+    file.encryption || (file.encryption_state && file.encryption_state !== 'plain'),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -60,6 +64,7 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
     setProgress(0);
     setError(null);
     setLocalPath(null);
+    setDirectStreamUrl(null);
     setSourceUrl(null);
 
     const prepareCachedMedia = async () => {
@@ -80,8 +85,13 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
         if (cancelled) return;
         if (!path) throw new Error('Android could not prepare a local media file.');
 
-        setLocalPath(path);
-        setSourceUrl(convertFileSrc(path));
+        if (path.startsWith('http://127.0.0.1:') || path.startsWith('http://localhost:')) {
+          setDirectStreamUrl(path);
+          setSourceUrl(path);
+        } else {
+          setLocalPath(path);
+          setSourceUrl(convertFileSrc(path));
+        }
         setProgress(100);
         setLoading(false);
       } catch (prepareError) {
@@ -92,34 +102,25 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
     };
 
     const prepare = async () => {
-      if ((isVideo || isAudio) && !usingDownloadFallback) {
+      if ((isVideo || isAudio) && !isFileEncrypted && !usingDownloadFallback) {
         try {
-          const streamInfo = await invoke<StreamInfo | null>('cmd_get_stream_info');
+          const streamInfo = await invoke<StreamInfo | null>('cmd_get_stream_info', {
+            folderId: activeFolderId,
+            messageId: file.id,
+          });
           if (cancelled) return;
           if (streamInfo?.base_url && streamInfo?.token) {
             const folder = activeFolderId === null ? 'home' : String(activeFolderId);
             const credential = streamInfo.operation_token ? `&credential=${encodeURIComponent(streamInfo.operation_token)}` : '';
             const streamUrl = `${streamInfo.base_url}/stream/${folder}/${file.id}?token=${encodeURIComponent(streamInfo.token)}${credential}`;
-            await invoke('cmd_open_android_stream_player', {
-              streamUrl,
-              title: file.name,
-              mimeType: file.mime_type && file.mime_type !== 'application/octet-stream'
-                ? file.mime_type
-                : isVideo ? 'video/*' : 'audio/*',
-              mediaId: `${activeFolderId ?? 'home'}:${file.id}`,
-              preferencesJson: JSON.stringify(preferences ?? {
-                privateMetadata: true,
-                privacyScreen: false,
-                orientation: 'auto',
-                subtitleScale: 1,
-                playbackSpeed: 1,
-              }),
-            });
-            if (!cancelled) onClose();
+            setDirectStreamUrl(streamUrl);
+            setSourceUrl(streamUrl);
+            setProgress(100);
+            setLoading(false);
             return;
           }
         } catch {
-          // Fall back automatically to in-app cached playback when native local HTTP streaming is unavailable.
+          // Fall back automatically to cached playback when local HTTP streaming is unavailable.
         }
       }
       await prepareCachedMedia();
@@ -132,7 +133,13 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
       videoRef.current?.pause();
       audioRef.current?.pause();
     };
-  }, [activeFolderId, attempt, file.id, file.mime_type, file.name, isAudio, isVideo, onClose, preferences, usingDownloadFallback]);
+  }, [activeFolderId, attempt, file.id, file.mime_type, file.name, isAudio, isFileEncrypted, isVideo, onClose, preferences, t, usingDownloadFallback]);
+
+  useEffect(() => {
+    const rate = preferences?.playbackSpeed && preferences.playbackSpeed > 0 ? preferences.playbackSpeed : 1;
+    if (videoRef.current) videoRef.current.playbackRate = rate;
+    if (audioRef.current) audioRef.current.playbackRate = rate;
+  }, [preferences?.playbackSpeed, sourceUrl]);
 
   const retry = useCallback(() => setAttempt(value => value + 1), []);
   const downloadAndPlay = useCallback(() => {
@@ -141,13 +148,26 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
   }, []);
 
   const openExternally = useCallback(async () => {
-    if (!localPath) return;
     try {
+      if (directStreamUrl) {
+        await invoke('cmd_open_android_stream_player', {
+          streamUrl: directStreamUrl,
+          title: file.name,
+          mimeType:
+            file.mime_type && file.mime_type !== 'application/octet-stream'
+              ? file.mime_type
+              : isVideo
+                ? 'video/*'
+                : 'audio/*',
+        });
+        return;
+      }
+      if (!localPath) return;
       await invoke('cmd_open_file_externally', { path: localPath });
     } catch (openError) {
       setError(userFacingError(openError, t));
     }
-  }, [localPath]);
+  }, [directStreamUrl, file.mime_type, file.name, isVideo, localPath, t]);
 
   const handlePlaybackError = useCallback(() => {
     setError('This file was downloaded, but the Android WebView cannot decode its media format. You can open it with another installed media app.');
@@ -160,9 +180,22 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
           <p className="truncate text-sm font-semibold">{file.name}</p>
           <p className="mt-0.5 text-[10px] text-white/55">Secure in-app playback</p>
         </div>
-        <button type="button" onClick={onClose} className="rounded-full p-2 text-white/75 hover:bg-white/10 hover:text-white" aria-label={i18n.t('viewer.close_player')}>
-          <X className="h-5 w-5" aria-hidden="true" />
-        </button>
+        <div className="flex items-center gap-1.5">
+          {(directStreamUrl || localPath) && (
+            <button
+              type="button"
+              onClick={() => void openExternally()}
+              className="rounded-full p-2 text-white/75 hover:bg-white/10 hover:text-white"
+              title="Open in external player"
+              aria-label="Open in external player"
+            >
+              <ExternalLink className="h-4 w-4" aria-hidden="true" />
+            </button>
+          )}
+          <button type="button" onClick={onClose} className="rounded-full p-2 text-white/75 hover:bg-white/10 hover:text-white" aria-label={i18n.t('viewer.close_player')}>
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
       </header>
 
       <main className="flex min-h-0 flex-1 items-center justify-center p-4">
@@ -212,7 +245,7 @@ export function MobileMediaPlayer({ file, activeFolderId, onClose, preferences }
                   <Loader2 className="h-4 w-4" aria-hidden="true" /> Download fallback
                 </button>
               )}
-              {localPath && (
+              {(directStreamUrl || localPath) && (
                 <button type="button" onClick={() => void openExternally()} className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-xs font-semibold text-white">
                   <ExternalLink className="h-4 w-4" aria-hidden="true" /> Open in another app
                 </button>

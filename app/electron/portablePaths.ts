@@ -13,6 +13,8 @@ export interface PortablePaths {
   sessionDir: string;
   dbDir: string;
   storesDir: string;
+  backupsDir: string;
+  binDir: string;
   previewsCacheDir: string;
   thumbnailsCacheDir: string;
   offlineCacheDir: string;
@@ -49,6 +51,8 @@ export function initPortablePaths(app: App): PortablePaths {
     sessionDir: path.join(dataRoot, 'session'),
     dbDir: path.join(dataRoot, 'db'),
     storesDir: path.join(dataRoot, 'stores'),
+    backupsDir: path.join(dataRoot, 'backups'),
+    binDir: path.join(dataRoot, 'bin'),
     previewsCacheDir: path.join(dataRoot, 'cache', 'previews'),
     thumbnailsCacheDir: path.join(dataRoot, 'cache', 'thumbnails'),
     offlineCacheDir: path.join(dataRoot, 'cache', 'offline'),
