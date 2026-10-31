@@ -1,8 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { motion, AnimatePresence } from "framer-motion";
 import { Sun, Moon, ExternalLink, X } from "lucide-react";
 import { load } from '@tauri-apps/plugin-store';
+import { toast } from 'sonner';
 import { useTheme } from '../../context/ThemeContext';
 import { open } from '@tauri-apps/plugin-shell';
 import {
@@ -62,7 +65,23 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     }, [isMobile, loginMethod]);
     const [qrUrl, setQrUrl] = useState<string | null>(null);
     const [qrPolling, setQrPolling] = useState(false);
+    const [qrScanned, setQrScanned] = useState(false);
+    const [importingPortable, setImportingPortable] = useState(false);
     const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const onLoginRef = useRef(onLogin);
+    onLoginRef.current = onLogin;
+
+    const cancelQrFlow = useCallback(() => {
+        setQrPolling(false);
+        setQrScanned(false);
+        void invoke("cmd_auth_qr_cancel").catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            void invoke("cmd_auth_qr_cancel").catch(() => {});
+        };
+    }, []);
 
 
     useEffect(() => {
@@ -124,6 +143,18 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                 if (savedId && savedHash) {
                     setApiId(savedId);
                     setApiHash(savedHash);
+                } else {
+                    try {
+                        const savedSession = await invoke<{ hasSession: boolean; apiId: number | null }>('cmd_get_saved_session_info');
+                        if (savedSession?.apiId && savedHash) {
+                            setApiId(String(savedSession.apiId));
+                            setApiHash(savedHash);
+                        } else if (savedSession?.apiId && !savedId) {
+                            setApiId(String(savedSession.apiId));
+                        }
+                    } catch {
+                        // ignore
+                    }
                 }
             } catch {
                 // config not found, starting fresh
@@ -168,6 +199,7 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
 
     const handleQrLogin = async () => {
         setError(null);
+        setQrScanned(false);
         setLoading(true);
         try {
             const idInt = parseInt(apiId, 10);
@@ -179,16 +211,72 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
             });
 
             if (url === "__authorized__") {
-                onLogin();
+                setQrPolling(false);
+                onLoginRef.current();
+                return;
+            }
+            if (url === "__password_required__") {
+                setQrPolling(false);
+                setStep("password");
                 return;
             }
 
             setQrUrl(url);
             setQrPolling(true);
         } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : String(err));
+            handleAuthError(err);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const runPortableImport = async (sourcePath: string) => {
+        setError(null);
+        setImportingPortable(true);
+        try {
+            const result = await invoke<{ restoredSession: boolean; restoredVault: boolean; restoredApiId: number | null; restoredStores: string[] }>(
+                'cmd_import_portable_bundle',
+                { sourcePath },
+            );
+            toast.success(result.restoredSession ? 'Portable session & data restored.' : 'Portable settings restored.');
+            if (result.restoredSession) {
+                onLoginRef.current();
+                return;
+            }
+            window.location.reload();
+        } catch (err: unknown) {
+            handleAuthError(err);
+        } finally {
+            setImportingPortable(false);
+        }
+    };
+
+    const handleImportPortableFile = async () => {
+        try {
+            const selected = await openDialog({
+                directory: false,
+                multiple: false,
+                title: 'Import Telegram Drive Portable Package (.tdmigrate)',
+                filters: [{ name: 'Telegram Drive Portable Migration', extensions: ['tdmigrate'] }],
+            });
+            if (!selected || Array.isArray(selected)) return;
+            await runPortableImport(selected);
+        } catch (err: unknown) {
+            handleAuthError(err);
+        }
+    };
+
+    const handleImportPortableFolder = async () => {
+        try {
+            const selected = await openDialog({
+                directory: true,
+                multiple: false,
+                title: 'Select Previous Telegram Drive Folder or Portable Data Folder',
+            });
+            if (!selected || Array.isArray(selected)) return;
+            await runPortableImport(selected);
+        } catch (err: unknown) {
+            handleAuthError(err);
         }
     };
 
@@ -205,6 +293,53 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     };
 
     useEffect(() => {
+        let cancelled = false;
+        let unlisten: (() => void) | null = null;
+
+        void listen<{
+            status: 'url' | 'scanned' | 'password_required' | 'authorized' | 'error';
+            url?: string;
+            error?: string;
+        }>('qr-auth-update', (event) => {
+            if (cancelled) return;
+            const payload = event.payload;
+            if (!payload) return;
+
+            if (payload.status === 'url' && payload.url) {
+                setQrScanned(false);
+                setQrUrl(prev => (payload.url && payload.url !== prev ? payload.url : prev));
+            } else if (payload.status === 'scanned') {
+                setQrScanned(true);
+            } else if (payload.status === 'password_required') {
+                setQrScanned(false);
+                setQrPolling(false);
+                setStep('password');
+            } else if (payload.status === 'authorized') {
+                setQrScanned(false);
+                setQrPolling(false);
+                onLoginRef.current();
+            } else if (payload.status === 'error' && payload.error) {
+                setQrScanned(false);
+                setQrPolling(false);
+                const floodMatch = payload.error.match(/FLOOD_WAIT_(\d+)/);
+                if (floodMatch) {
+                    setFloodWait(Number.parseInt(floodMatch[1], 10));
+                } else {
+                    setError(payload.error);
+                }
+            }
+        }).then((dispose) => {
+            if (cancelled) dispose();
+            else unlisten = dispose;
+        }).catch(() => {});
+
+        return () => {
+            cancelled = true;
+            unlisten?.();
+        };
+    }, []);
+
+    useEffect(() => {
         if (!qrPolling) {
             if (qrPollRef.current) {
                 clearInterval(qrPollRef.current);
@@ -215,26 +350,32 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
 
         qrPollRef.current = setInterval(async () => {
             try {
-                const pollResult = await invoke<{ success: boolean; next_step?: string; url?: string | null }>("cmd_auth_qr_poll");
+                const pollResult = await invoke<{ success: boolean; next_step?: string; url?: string | null; scanned?: boolean }>("cmd_auth_qr_poll");
                 if (pollResult.url) {
                     setQrUrl(prev => (pollResult.url && pollResult.url !== prev ? pollResult.url : prev));
                 }
+                if (typeof pollResult.scanned === 'boolean') {
+                    setQrScanned(pollResult.scanned);
+                }
                 if (pollResult.next_step === "password") {
+                    setQrScanned(false);
                     setQrPolling(false);
                     setStep("password");
                 } else if (pollResult.success) {
+                    setQrScanned(false);
                     setQrPolling(false);
-                    onLogin();
+                    onLoginRef.current();
                 }
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
-                if (/API_ID_INVALID|API_CREDENTIALS_MISSING/i.test(msg)) {
+                if (/API_ID_INVALID|API_CREDENTIALS_MISSING|FLOOD_WAIT_/i.test(msg)) {
+                    setQrScanned(false);
                     setQrPolling(false);
                     handleAuthError(err);
                 }
                 // Otherwise ignore transient errors while Telegram rotates the QR token.
             }
-        }, 3000);
+        }, 1200);
 
         return () => {
             if (qrPollRef.current) {
@@ -434,11 +575,14 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                     apiId={apiId}
                                     apiHash={apiHash}
                                     isMobile={isMobile}
+                                    importingPortable={importingPortable}
                                     onApiIdChange={setApiId}
                                     onApiHashChange={setApiHash}
                                     onSubmit={handleSetupSubmit}
                                     onShowHelp={() => setShowHelp(true)}
                                     onDevLogin={onLogin}
+                                    onImportPortableFile={isMobile ? undefined : () => { void handleImportPortableFile(); }}
+                                    onImportPortableFolder={isMobile ? undefined : () => { void handleImportPortableFolder(); }}
                                 />
                             )}
                             {step === "phone" && (
@@ -449,12 +593,13 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                     phone={phone}
                                     qrUrl={qrUrl}
                                     qrPolling={qrPolling}
+                                    qrScanned={qrScanned}
                                     onPhoneChange={setPhone}
-                                    onSelectPhone={() => { setLoginMethod("phone"); setQrUrl(null); setQrPolling(false); setError(null); }}
+                                    onSelectPhone={() => { cancelQrFlow(); setLoginMethod("phone"); setQrUrl(null); setError(null); }}
                                     onSelectQr={() => { setLoginMethod("qr"); setError(null); void handleQrLogin(); }}
                                     onPhoneSubmit={handlePhoneSubmit}
                                     onQrLogin={() => { void handleQrLogin(); }}
-                                    onBack={() => { setStep("setup"); if (loginMethod === "qr") setQrPolling(false); }}
+                                    onBack={() => { cancelQrFlow(); setStep("setup"); }}
                                 />
                             )}
                             {step === "code" && (

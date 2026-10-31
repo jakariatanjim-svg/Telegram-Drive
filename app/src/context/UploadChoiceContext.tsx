@@ -3,8 +3,13 @@ import { useModalFocus } from '../hooks/useModalFocus';
 import i18n from '../i18n';
 
 export type UploadChoice = 'store' | 'protect';
+
+export interface UploadChoiceOptions {
+    hasVideo?: boolean;
+}
+
 interface UploadChoiceContextValue {
-    chooseUploadProtection: (count: number) => Promise<UploadChoice | null>;
+    chooseUploadProtection: (count: number, options?: UploadChoiceOptions) => Promise<UploadChoice | null>;
 }
 const UploadChoiceContext = createContext<UploadChoiceContextValue | null>(null);
 const Dialog = lazy(() => import('../components/shared/UploadProtectionDialog'));
@@ -23,7 +28,7 @@ function PendingUploadDialog({ failed = false, retry }: { failed?: boolean; retr
 }
 
 export function UploadChoiceProvider({ children }: { children: ReactNode }) {
-    const [request, setRequest] = useState<{ count: number; id: number; resolve: (choice: UploadChoice | null) => void } | null>(null);
+    const [request, setRequest] = useState<{ count: number; hasVideo: boolean; id: number; resolve: (choice: UploadChoice | null) => void } | null>(null);
     const requestRef = useRef(request);
     const nextId = useRef(0);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -35,8 +40,8 @@ export function UploadChoiceProvider({ children }: { children: ReactNode }) {
     }, []);
     useModalFocus(panelRef, () => finish(null), !!request);
     useEffect(() => () => { requestRef.current?.resolve(null); requestRef.current = null; }, []);
-    const chooseUploadProtection = useCallback((count: number) => new Promise<UploadChoice | null>((resolve) => {
-        const nextRequest = { count, id: ++nextId.current, resolve };
+    const chooseUploadProtection = useCallback((count: number, options?: UploadChoiceOptions) => new Promise<UploadChoice | null>((resolve) => {
+        const nextRequest = { count, hasVideo: Boolean(options?.hasVideo), id: ++nextId.current, resolve };
         requestRef.current?.resolve(null);
         requestRef.current = nextRequest;
         setRequest(nextRequest);
@@ -54,7 +59,7 @@ export function UploadChoiceProvider({ children }: { children: ReactNode }) {
             <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="upload-choice-title" tabIndex={-1} className="quiet-raised max-h-[calc(100dvh-2rem)] w-[min(520px,calc(100vw-2rem))] overflow-y-auto p-5">
                 <UploadDialogBoundary key={request.id} fallback={<PendingUploadDialog failed retry={() => retry(request.id)} />}>
                     <Suspense fallback={<PendingUploadDialog retry={() => retry(request.id)} />}>
-                        <Dialog count={request.count} onFinish={choice => { if (requestRef.current?.id === request.id) finish(choice); }} />
+                        <Dialog count={request.count} hasVideo={request.hasVideo} onFinish={choice => { if (requestRef.current?.id === request.id) finish(choice); }} />
                     </Suspense>
                 </UploadDialogBoundary>
                 <div className="mt-4 flex justify-end"><button type="button" onClick={() => finish(null, request.id)} className="quiet-control min-h-11 px-4 text-sm text-app-text-secondary">{i18n.t('common.cancel')}</button></div>

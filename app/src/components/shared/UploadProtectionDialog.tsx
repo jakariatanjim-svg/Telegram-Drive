@@ -1,14 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
-import { LockKeyhole, UploadCloud } from 'lucide-react';
+import { Film, LockKeyhole, UploadCloud } from 'lucide-react';
 import { useEncryption } from '../../hooks/useEncryption';
 import { useSettings } from '../../context/SettingsContext';
 import type { UploadChoice } from '../../context/UploadChoiceContext';
 import { EncryptionSettingsSection } from './EncryptionSettingsSection';
 import i18n from '../../i18n';
 
-export default function UploadProtectionDialog({ count, onFinish }: { count: number; onFinish: (choice: UploadChoice | null) => void }) {
+export default function UploadProtectionDialog({
+    count,
+    hasVideo = false,
+    onFinish,
+}: {
+    count: number;
+    hasVideo?: boolean;
+    onFinish: (choice: UploadChoice | null) => void;
+}) {
     const encryption = useEncryption();
-    const { settings } = useSettings();
+    const { settings, updateSetting } = useSettings();
     const [vaultStep, setVaultStep] = useState(false);
     const activeRef = useRef(true);
     useEffect(() => { activeRef.current = true; return () => { activeRef.current = false; }; }, []);
@@ -42,6 +50,28 @@ export default function UploadProtectionDialog({ count, onFinish }: { count: num
                             <p>{i18n.t(encryption.capabilityState === 'loading' ? 'settings.encryption_checking' : encryption.capabilityState === 'blocked' ? 'settings.encryption_safety_pause_title' : encryption.capabilityState === 'disabled' ? 'settings.encryption_disabled' : 'settings.encryption_backend_error')}</p>
                             {encryption.capabilityState !== 'loading' && <button type="button" onClick={() => void encryption.refreshCapabilities()} className="quiet-control mt-2 min-h-11 px-3 text-app-accent">{i18n.t('settings.retry_encryption_check')}</button>}
                         </div>}
+                        {hasVideo && (
+                            <div className="mt-4 rounded-lg border border-app-border-subtle bg-app-surface-sunken p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <Film className="h-4 w-4 shrink-0 text-app-accent" />
+                                        <div className="min-w-0">
+                                            <p className="text-xs font-semibold text-app-text">{i18n.t('settings.video_upload_default')}</p>
+                                            <p className="text-[11px] text-app-text-secondary">{i18n.t('settings.video_upload_desc')}</p>
+                                        </div>
+                                    </div>
+                                    <select
+                                        value={settings.videoUploadMode}
+                                        onChange={event => updateSetting('videoUploadMode', event.target.value as 'file' | 'media')}
+                                        aria-label={i18n.t('settings.video_upload_default')}
+                                        className="settings-select shrink-0 text-xs"
+                                    >
+                                        <option value="media">{i18n.t('settings.video_upload_media')}</option>
+                                        <option value="file">{i18n.t('settings.video_upload_file')}</option>
+                                    </select>
+                                </div>
+                            </div>
+                        )}
                         <div className="mt-5 grid gap-3 sm:grid-cols-2">
                             <button onClick={() => onFinish('store')} className="quiet-surface p-4 text-start hover:border-app-accent/40 hover:bg-app-hover">
                                 <UploadCloud className="mb-3 h-5 w-5 text-app-accent" />

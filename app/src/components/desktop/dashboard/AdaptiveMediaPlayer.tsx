@@ -595,14 +595,18 @@ export function AdaptiveMediaPlayer({
         }
     }, [file.id, activeFolderId, mseVideoRef, pollTranscodeStatus, abortMse, log, streamUrl]);
 
+    const [ffmpegNoticeRequested, setFfmpegNoticeRequested] = useState(false);
+
     // ── Handle quality change ────────────────────────────────────────
     const handleQualityChange = useCallback((quality: StreamingQuality) => {
-        log('handleQualityChange', { quality, currentPlaybackMode: playbackMode, transcodeAvailable: transcodeCapabilities?.available });
-
-        // Always update quality first for immediate UI feedback
-        setQuality(quality);
+        const ffmpegReady = Boolean(
+            transcodeCapabilities?.available ?? transcodeCapabilities?.ffmpeg_available,
+        );
+        log('handleQualityChange', { quality, currentPlaybackMode: playbackMode, transcodeAvailable: ffmpegReady });
 
         if (quality === 'original') {
+            setQuality('original');
+            setFfmpegNoticeRequested(false);
             // Clean up HLS if switching back from transcode mode
             if (hlsRef.current) {
                 hlsRef.current.destroy();
@@ -623,18 +627,19 @@ export function AdaptiveMediaPlayer({
             setHlsPlaylistUrl(null);
             setHlsError(null);
             setHlsVideoReady(false);
-            // Force re-init of the MSE pipeline by bumping restartNonce.
-            // This causes useAdaptiveStreaming to reinitialize with a new streamUrl.
             log('Switching back to original — restarting MSE pipeline');
             setRestartNonce(n => n + 1);
-        } else if (transcodeCapabilities?.available) {
-            // FFmpeg available — start real transcode for HLS playback
+        } else if (ffmpegReady) {
+            setQuality(quality);
+            setFfmpegNoticeRequested(false);
             startTranscode(quality);
         } else {
-            // FFmpeg not available — log and fall through to throttle mode
-            log('FFmpeg unavailable, using throttle mode for', quality);
+            // Keep streaming full uncompressed original quality without any bandwidth cap,
+            // and surface the optional FFmpeg helper if the user wants resolution transcoding.
+            setQuality('original');
+            setFfmpegNoticeRequested(true);
+            toast.info(i18n.t('settings.ffmpeg_required_title'));
         }
-        // If FFmpeg not available: setQuality already applied the bandwidth throttle
     }, [setQuality, startTranscode, transcodeCapabilities, playbackMode, log]);
 
     // ── Fullscreen helpers (DOM/video fullscreen first, Tauri fallback) ──
@@ -934,7 +939,6 @@ export function AdaptiveMediaPlayer({
 
     // ── Determine current display state ──────────────────────────────
     const isHlsMode = playbackMode === 'hls';
-    const hasVideoTrack = tracks.some(t => t.type === 'video');
     const isMseLoading = msePhase === 'loading' || msePhase === 'initializing';
     const isHlsLoading = hlsPhase === 'preparing' || hlsPhase === 'caching' || hlsPhase === 'transcoding';
     const originalDisplayPhase: string = originalPlaybackError
@@ -1140,18 +1144,16 @@ export function AdaptiveMediaPlayer({
                                     <span>{isHlsMode ? '—' : measuredKbps > 999 ? `${(measuredKbps / 1000).toFixed(1)} Mbps` : `${Math.round(measuredKbps)} Kbps`}</span>
                                 </div>
                                 <div className="flex justify-between gap-4">
-                                    <span className="text-white/40">{i18n.t('viewer.cap')}</span>
-                                    <span>{effectiveQuality === 'original' ? i18n.t("settings.unlimited") : `${qualityLabel(effectiveQuality, i18n.t('settings.original'))}${!transcodeCapabilities?.available ? ' (throttle)' : ''}`}</span>
+                                    <span className="text-white/40">{i18n.t('viewer.mode')}</span>
+                                    <span className={isHlsMode ? 'text-emerald-400' : 'text-white/70'}>
+                                        {isHlsMode && hlsQuality
+                                            ? `HLS · ${qualityLabel(hlsQuality, i18n.t('settings.original'))}`
+                                            : i18n.t("settings.original")}
+                                    </span>
                                 </div>
                                 <div className="flex justify-between gap-4">
                                     <span className="text-white/40">{i18n.t('viewer.buffered')}</span>
                                     <span>{debugBufferedSecs.toFixed(1)}s</span>
-                                </div>
-                                <div className="flex justify-between gap-4">
-                                    <span className="text-white/40">{i18n.t('viewer.mode')}</span>
-                                    <span className={isHlsMode ? 'text-emerald-400' : effectiveQuality !== 'original' && !transcodeCapabilities?.available ? 'text-amber-400' : 'text-white/60'}>
-                                        {isHlsMode ? 'HLS' : effectiveQuality !== 'original' && !transcodeCapabilities?.available ? 'Bandwidth capped' : i18n.t("settings.original")}
-                                    </span>
                                 </div>
                                 {(sourceResolution || playingResolution) && (
                                     <div className="flex justify-between gap-4">
@@ -1224,18 +1226,16 @@ export function AdaptiveMediaPlayer({
 
                             <div className="flex items-center gap-2">
                                 {/* Quality selector in fullscreen */}
-                                {!useFallback && (
-                                    <QualitySelector
-                                        currentQuality={effectiveQuality}
-                                        onChange={handleQualityChange}
-                                        adaptiveMode={adaptiveMode}
-                                        onToggleAdaptive={() => setAdaptiveMode(!adaptiveMode)}
-                                        measuredSpeedKbps={measuredKbps}
-                                        transcodeCapabilities={transcodeCapabilities}
-                                        variantStates={hlsVariantStates}
-                                        sourceHeight={sourceHeight}
-                                    />
-                                )}
+                                <QualitySelector
+                                    currentQuality={effectiveQuality}
+                                    onChange={handleQualityChange}
+                                    adaptiveMode={adaptiveMode}
+                                    onToggleAdaptive={() => setAdaptiveMode(!adaptiveMode)}
+                                    measuredSpeedKbps={measuredKbps}
+                                    transcodeCapabilities={transcodeCapabilities}
+                                    variantStates={hlsVariantStates}
+                                    sourceHeight={sourceHeight}
+                                />
 
                                 {/* Exit fullscreen */}
                                 <button
@@ -1269,11 +1269,8 @@ export function AdaptiveMediaPlayer({
                             {isHlsMode && hlsQuality && (
                                 <span className="text-telegram-primary">{qualityLabel(hlsQuality, i18n.t('settings.original'))}</span>
                             )}
-                            {hasVideoTrack && !isHlsMode && tracks.find(t => t.type === 'video') && (
-                                <span>
-                                    {tracks.find(t => t.type === 'video')?.width}p
-
-                                </span>
+                            {!isHlsMode && sourceHeight && (
+                                <span>{sourceHeight}p</span>
                             )}
                             {typeof currentIndex === 'number' && typeof totalItems === 'number' && totalItems > 0 && (
                                 <span>{currentIndex + 1}/{totalItems}</span>
@@ -1287,13 +1284,11 @@ export function AdaptiveMediaPlayer({
                         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${
                             isHlsMode
                                 ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-                                : effectiveQuality !== 'original' && !transcodeCapabilities?.available
-                                    ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
-                                    : 'text-white/40 bg-white/5 border-white/10'
+                                : 'text-white/50 bg-white/5 border-white/10'
                         }`}>
-                            {isHlsMode ? 'HLS' : effectiveQuality !== 'original' && !transcodeCapabilities?.available ? 'Throttled' : i18n.t("settings.original")}
+                            {isHlsMode ? 'HLS' : i18n.t("settings.original")}
                         </span>
-                    {!useFallback && displayPhase !== 'error' && displayPhase !== 'failed' && (
+                    {displayPhase !== 'error' && displayPhase !== 'failed' && (
                         <QualitySelector
                             currentQuality={effectiveQuality}
                             onChange={handleQualityChange}
@@ -1308,8 +1303,11 @@ export function AdaptiveMediaPlayer({
                     </div>
                 </div>}
 
-                {!isFullscreen && (
-                    <FfmpegInstallNotice available={transcodeCapabilities?.available} variant="player" />
+                {!isFullscreen && ffmpegNoticeRequested && (
+                    <FfmpegInstallNotice
+                        available={transcodeCapabilities?.available ?? transcodeCapabilities?.ffmpeg_available}
+                        variant="player"
+                    />
                 )}
 
                 {!isFullscreen && playback && <PlaybackControls playback={playback} />}

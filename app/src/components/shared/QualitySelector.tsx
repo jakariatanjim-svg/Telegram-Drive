@@ -1,6 +1,12 @@
 import { useTranslation } from 'react-i18next';
-import { StreamingQuality, qualityLabel, HLS_QUALITIES, QUALITY_THROTTLE_MAP, TranscodeCapabilities, TranscodeJobPhase } from '../../types';
-import { Zap, Wifi, Loader2, AlertTriangle, Check, Gauge } from 'lucide-react';
+import {
+    StreamingQuality,
+    qualityLabel,
+    HLS_QUALITIES,
+    TranscodeCapabilities,
+    TranscodeJobPhase,
+} from '../../types';
+import { Zap, Wifi, Loader2, AlertTriangle, Check } from 'lucide-react';
 import i18n from '../../i18n';
 
 interface QualitySelectorProps {
@@ -14,7 +20,15 @@ interface QualitySelectorProps {
     sourceHeight?: number | null;
 }
 
-const QUALITIES: StreamingQuality[] = ['360p', '480p', '720p', '1080p', 'original'];
+const QUALITIES: StreamingQuality[] = [
+    '360p',
+    '480p',
+    '720p',
+    '1080p',
+    '1440p',
+    '2160p',
+    'original',
+];
 
 export function QualitySelector({
     currentQuality,
@@ -27,113 +41,95 @@ export function QualitySelector({
     sourceHeight = null,
 }: QualitySelectorProps) {
     const { t } = useTranslation();
+
     const handleManualQuality = (quality: StreamingQuality) => {
         if (adaptiveMode) onToggleAdaptive();
         onChange(quality);
     };
 
-    const isTranscodeAvailable = transcodeCapabilities?.available ?? false;
+    const isTranscodeAvailable =
+        transcodeCapabilities?.available ?? transcodeCapabilities?.ffmpeg_available ?? false;
 
-    // Human-readable throttle label (e.g. "500k", "1M", "2.5M")
-    const throttleLabel = (quality: StreamingQuality): string => {
-        if (quality === 'original') return qualityLabel(quality, t('settings.original'));
-        const kbps = QUALITY_THROTTLE_MAP[quality];
-        if (kbps >= 1000) return `${(kbps / 1000).toFixed(kbps % 1000 === 0 ? 0 : 1)}M`;
-        return `${kbps}k`;
-    };
+    const visibleQualities = QUALITIES.filter(quality => {
+        if (quality === 'original' || currentQuality === quality) return true;
+        if (sourceHeight === null || sourceHeight <= 0) return true;
+        const qualityHeight = parseInt(quality, 10);
+        return qualityHeight <= sourceHeight;
+    });
 
     return (
-        <div className="flex items-center gap-2 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1.5 border border-white/10">
-            {/* Adaptive toggle */}
+        <div className="flex flex-wrap items-center gap-1.5 bg-black/50 backdrop-blur-sm rounded-lg px-2 py-1.5 border border-white/10">
+            {/* Adaptive Auto toggle */}
             <button
+                type="button"
                 onClick={onToggleAdaptive}
                 className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-all duration-200 ${
                     adaptiveMode
                         ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                        : 'text-white/40 hover:text-white/70 border border-transparent'
+                        : 'text-white/60 hover:text-white border border-transparent hover:bg-white/5'
                 }`}
-                title={adaptiveMode
-                    ? 'Adaptive mode: ON — auto-adjusts quality'
-                    : isTranscodeAvailable
-                        ? 'Adaptive mode: OFF — manual quality'
-                        : 'Adaptive mode disabled (requires FFmpeg/HLS)'}
-                disabled={!isTranscodeAvailable}
+                title={
+                    adaptiveMode
+                        ? 'Adaptive quality: ON — automatically selects optimal stream'
+                        : 'Adaptive quality: OFF — manual quality selection'
+                }
             >
                 <Wifi className="w-3 h-3" />
-                {i18n.t("settings.auto")}
+                {i18n.t('settings.auto')}
             </button>
 
             {/* Divider */}
             <div className="w-px h-5 bg-white/15" />
 
-            {/* Quality presets */}
-            {QUALITIES.map(quality => {
-                const isActive = currentQuality === quality;
+            {/* Full unlocked quality presets (360p through 4K + Original) */}
+            {visibleQualities.map(quality => {
+                const isActive = !adaptiveMode && currentQuality === quality;
                 const isHls = HLS_QUALITIES.includes(quality);
                 const variantState: TranscodeJobPhase = variantStates[quality] ?? 'idle';
-                const canTranscode = isTranscodeAvailable && isHls;
-
-                // Upscale prevention: disable qualities that exceed source resolution
-                const qualityHeight = quality === 'original' ? Infinity : parseInt(quality);
-                const isUpscale = sourceHeight !== null && quality !== 'original' && qualityHeight > sourceHeight;
-                const isDisabled = (isHls && !canTranscode) || isUpscale;
+                const label = qualityLabel(quality, t('settings.original'));
 
                 let statusIcon: React.ReactNode = null;
-
-                if (isHls && variantState === 'preparing') {
-                    statusIcon = <Loader2 className="w-3 h-3 animate-spin" />;
-                } else if (isHls && (variantState === 'caching' || variantState === 'transcoding')) {
+                if (isHls && (variantState === 'preparing' || variantState === 'caching' || variantState === 'transcoding')) {
                     statusIcon = <Loader2 className="w-3 h-3 animate-spin" />;
                 } else if (variantState === 'ready') {
                     statusIcon = <Check className="w-3 h-3 text-emerald-400" />;
                 } else if (variantState === 'failed') {
                     statusIcon = <AlertTriangle className="w-3 h-3 text-red-400" />;
-                } else if (isHls && !canTranscode) {
-                    statusIcon = <Gauge className="w-3 h-3 text-white/30" />;
                 }
 
-                const tooltipHint = quality === 'original'
-                    ? 'Stream original file'
-                    : isUpscale
-                        ? `Source is ${sourceHeight}p; ${quality} upscale disabled`
-                        : canTranscode
-                        ? variantState === 'preparing'
-                            ? `Preparing ${quality}...`
-                            : variantState === 'caching'
-                                ? 'Downloading source...'
+                const tooltipHint =
+                    quality === 'original'
+                        ? 'Stream full original quality (uncompressed)'
+                        : isTranscodeAvailable
+                          ? variantState === 'preparing'
+                              ? `Preparing ${label}...`
+                              : variantState === 'caching'
+                                ? 'Caching source stream...'
                                 : variantState === 'transcoding'
-                                    ? `Transcoding to ${quality}...`
-                                    : variantState === 'ready'
-                                        ? `${quality} ready (HLS)`
-                                        : variantState === 'failed'
-                                            ? `${quality} transcode failed — click to retry`
-                                            : `Switch to ${quality} (HLS transcoding)`
-                        : `Bandwidth cap: ${throttleLabel(quality)} — resolution unchanged`;
+                                  ? `Transcoding to ${label}...`
+                                  : variantState === 'ready'
+                                    ? `${label} ready (HLS)`
+                                    : variantState === 'failed'
+                                      ? `${label} transcode failed — click to retry`
+                                      : `Play in ${label}`
+                          : `Play ${label} (streams full source when FFmpeg is not installed)`;
 
                 return (
                     <button
+                        type="button"
                         key={quality}
                         onClick={() => handleManualQuality(quality)}
                         className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium transition-all duration-200 ${
                             isActive
                                 ? 'bg-telegram-primary/20 text-telegram-primary border border-telegram-primary/30'
                                 : adaptiveMode
-                                    ? 'text-white/35 hover:text-white/80 hover:bg-white/5 border border-transparent'
-                                    : isDisabled
-                                        ? 'text-white/25 hover:text-white/50 hover:bg-white/5 border border-white/5 opacity-50 cursor-not-allowed'
-                                        : 'text-white/50 hover:text-white/80 hover:bg-white/5 border border-transparent'
+                                  ? 'text-white/45 hover:text-white/85 hover:bg-white/5 border border-transparent'
+                                  : 'text-white/65 hover:text-white/95 hover:bg-white/5 border border-transparent'
                         }`}
                         title={tooltipHint}
-                        disabled={isDisabled}
                     >
                         {statusIcon}
-                        <span>{canTranscode ? qualityLabel(quality, t('settings.original')) : throttleLabel(quality)}</span>
-                        {isHls && !canTranscode && !isUpscale && (
-                            <span className="text-[8px] text-amber-400/60 ml-0.5">{t('viewer.cap')}</span>
-                        )}
-                        {isUpscale && (
-                            <span className="text-[8px] text-white/20 ml-0.5">N/A</span>
-                        )}
+                        <span>{label}</span>
                     </button>
                 );
             })}
@@ -142,7 +138,7 @@ export function QualitySelector({
             {adaptiveMode && measuredSpeedKbps !== undefined && measuredSpeedKbps > 0 && (
                 <>
                     <div className="w-px h-5 bg-white/15" />
-                    <span className="flex items-center gap-1 text-[10px] text-white/40">
+                    <span className="flex items-center gap-1 text-[10px] text-white/50">
                         <Zap className="w-3 h-3" />
                         {measuredSpeedKbps > 999
                             ? `${(measuredSpeedKbps / 1000).toFixed(1)} Mbps`

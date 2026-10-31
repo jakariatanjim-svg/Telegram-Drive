@@ -1,4 +1,5 @@
 import nodeCrypto from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { guessMimeType, type MappedTelegramFile } from '../shared/mtprotoHelpers';
@@ -40,6 +41,8 @@ export interface StreamServerCallbacks {
   uploadBuffer: (folderId: number | null, fileName: string, data: Uint8Array) => Promise<void>;
   deleteFile: (folderId: number | null, messageId: number) => Promise<void>;
   createFolder: (name: string) => Promise<{ id: number; name: string }>;
+  resolveHlsAssetPath?: (fileKey: string, quality: string, assetName: string) => string | null;
+  resolveFmp4Path?: (fileKey: string) => string | null;
 }
 
 function escapeXml(str: string): string {
@@ -191,8 +194,111 @@ button{width:100%;padding:10px;border:0;border-radius:8px;background:#38bdf8;col
       return;
     }
 
+    // /hls/:fileKey/:quality/:asset
+    if (parts[0] === 'hls' && parts.length >= 4 && this.callbacks.resolveHlsAssetPath) {
+      const queryToken = url.searchParams.get('token');
+      const authHeader = req.headers.authorization?.replace(/^Bearer\s+/i, '');
+      if (queryToken !== this.streamToken && authHeader !== this.streamToken) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Unauthorized stream token');
+        return;
+      }
+      const localFile = this.callbacks.resolveHlsAssetPath(parts[1], parts[2], parts[3]);
+      if (!localFile) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('HLS asset not found');
+        return;
+      }
+      if (localFile.endsWith('.m3u8')) {
+        const rawPlaylist = fs.readFileSync(localFile, 'utf8');
+        const authenticatedPlaylist = rawPlaylist
+          .split(/\r?\n/)
+          .map(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            const sep = trimmed.includes('?') ? '&' : '?';
+            return `${trimmed}${sep}token=${encodeURIComponent(this.streamToken)}`;
+          })
+          .join('\n');
+        const buf = Buffer.from(authenticatedPlaylist, 'utf8');
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+          'Content-Length': String(buf.byteLength),
+          'Cache-Control': 'no-cache',
+        });
+        res.end(buf);
+        return;
+      }
+      await this.serveLocalFileWithRange(req, res, localFile, 'video/mp2t');
+      return;
+    }
+
+    // /fmp4/:fileKey/:asset
+    if (parts[0] === 'fmp4' && parts.length >= 2 && this.callbacks.resolveFmp4Path) {
+      const queryToken = url.searchParams.get('token');
+      const authHeader = req.headers.authorization?.replace(/^Bearer\s+/i, '');
+      if (queryToken !== this.streamToken && authHeader !== this.streamToken) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Unauthorized stream token');
+        return;
+      }
+      const localFile = this.callbacks.resolveFmp4Path(parts[1]);
+      if (!localFile) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('fMP4 stream not found');
+        return;
+      }
+      await this.serveLocalFileWithRange(req, res, localFile, 'video/mp4');
+      return;
+    }
+
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
+  }
+
+  private async serveLocalFileWithRange(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    filePath: string,
+    mimeType: string,
+  ): Promise<void> {
+    const stat = fs.statSync(filePath);
+    const total = stat.size;
+    const range = parseRangeHeader(req.headers.range, total);
+    const start = range ? range.start : 0;
+    const end = range ? range.end : Math.max(0, total - 1);
+    const contentLength = total > 0 ? end - start + 1 : 0;
+
+    if (range) {
+      res.writeHead(206, {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Content-Length': String(contentLength),
+      });
+    } else {
+      res.writeHead(200, {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(total),
+      });
+    }
+
+    if (req.method === 'HEAD' || total === 0) {
+      res.end();
+      return;
+    }
+
+    await new Promise<void>(resolve => {
+      const stream = fs.createReadStream(filePath, { start, end });
+      req.on('close', () => stream.destroy());
+      stream.on('error', () => {
+        if (!res.writableEnded) res.end();
+        resolve();
+      });
+      stream.on('end', () => resolve());
+      stream.pipe(res);
+    });
   }
 
   private async streamTelegramMessage(

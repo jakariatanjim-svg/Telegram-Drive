@@ -1,4 +1,11 @@
-export type StreamingQuality = '360p' | '480p' | '720p' | '1080p' | 'original';
+export type StreamingQuality =
+  | '360p'
+  | '480p'
+  | '720p'
+  | '1080p'
+  | '1440p'
+  | '2160p'
+  | 'original';
 
 export interface StreamingSettings {
   quality: StreamingQuality;
@@ -15,34 +22,55 @@ export interface VideoTrackInfo {
   duration?: number;
 }
 
-/** Bandwidth cap in kilobits per second for each quality preset. 0 = unlimited. */
+/**
+ * Artificial client-side bandwidth throttling is disabled (0 = unlimited) so all
+ * users stream at full speed without supporter-tier caps.
+ */
 export const QUALITY_THROTTLE_MAP: Record<StreamingQuality, number> = {
-  '360p': 500,
-  '480p': 1000,
-  '720p': 2500,
-  '1080p': 5000,
+  '360p': 0,
+  '480p': 0,
+  '720p': 0,
+  '1080p': 0,
+  '1440p': 0,
+  '2160p': 0,
   original: 0,
 };
 
 /** Thresholds for adaptive quality switching, ordered highest to lowest. */
 export const ADAPTIVE_THRESHOLDS: { minKbps: number; quality: StreamingQuality }[] = [
+  { minKbps: 14000, quality: '2160p' },
+  { minKbps: 8000, quality: '1440p' },
   { minKbps: 4000, quality: '1080p' },
   { minKbps: 2000, quality: '720p' },
   { minKbps: 800, quality: '480p' },
   { minKbps: 0, quality: '360p' },
 ];
 
-/** Resolve the only prose label at render time; numeric quality identifiers stay literal. */
+/** Resolve display label for quality presets; 2160p renders concisely as 4K. */
 export function qualityLabel(quality: StreamingQuality, originalLabel: string): string {
-  return quality === 'original' ? originalLabel : quality;
+  if (quality === 'original') return originalLabel;
+  if (quality === '2160p') return '4K';
+  return quality;
 }
 
-export const HLS_QUALITIES: StreamingQuality[] = ['360p', '480p', '720p', '1080p'];
+export const HLS_QUALITIES: StreamingQuality[] = [
+  '360p',
+  '480p',
+  '720p',
+  '1080p',
+  '1440p',
+  '2160p',
+];
 
 export interface TranscodeCapabilities {
   available: boolean;
+  ffmpeg_available?: boolean;
+  hardware_encoder?: string | null;
   variants: QualityVariant[];
   mode: 'hls' | 'original';
+  cache_size_bytes?: number;
+  max_cache_gb?: number;
+  entries?: CacheEntry[];
 }
 
 export interface QualityVariant {

@@ -13,9 +13,11 @@ import {
   net,
   powerMonitor,
   protocol,
+  session,
   shell,
 } from 'electron';
 import { DesktopEngine } from './engine';
+import { atomicWriteFileSync } from './mtprotoNode';
 import { initPortablePaths } from './portablePaths';
 
 // CRITICAL PORTABLE REQUIREMENT:
@@ -48,6 +50,8 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let shutdownComplete = false;
+let shutdownPromise: Promise<void> | null = null;
 const storeCache = new Map<string, Record<string, unknown>>();
 
 function sendRendererEvent(event: string, payload: unknown): void {
@@ -113,11 +117,31 @@ function saveJsonStore(storeName: string): void {
   const safeName = path.basename(storeName || 'store.json');
   const data = storeCache.get(safeName) ?? {};
   const filePath = path.join(portablePaths.storesDir, safeName);
-  const tmp = `${filePath}.tmp`;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-  fs.renameSync(tmp, filePath);
+  atomicWriteFileSync(filePath, JSON.stringify(data, null, 2));
 }
+
+function flushAllStoresSync(): void {
+  for (const storeName of storeCache.keys()) {
+    try {
+      saveJsonStore(storeName);
+    } catch {
+      // Best-effort flush
+    }
+  }
+}
+
+function reloadAllStoresSync(): void {
+  storeCache.clear();
+}
+
+engine.setLifecycleHooks({
+  flushStoresSync: flushAllStoresSync,
+  reloadStoresSync: reloadAllStoresSync,
+  triggerAppQuit: () => {
+    isQuitting = true;
+    app.quit();
+  },
+});
 
 function setupTray(): void {
   if (tray) return;
@@ -443,9 +467,20 @@ void app.whenReady().then(async () => {
   await engine.initialize();
 
   powerMonitor.on('suspend', () => {
+    engine.flushSync();
     const prefs = engine.getDesktopPreferences();
     if (prefs.lockOnSleep !== false) {
       engine.vault.lock();
+    }
+  });
+
+  powerMonitor.on('shutdown', () => {
+    isQuitting = true;
+    engine.flushSync();
+    try {
+      session.defaultSession.flushStorageData();
+    } catch {
+      // Ignore
     }
   });
 
@@ -453,15 +488,45 @@ void app.whenReady().then(async () => {
   createMainWindow();
 });
 
+// Windows emits 'session-end' when the user restarts, shuts down, or signs out of Windows.
+(app as unknown as NodeJS.EventEmitter).on('session-end', () => {
+  isQuitting = true;
+  engine.flushSync();
+  try {
+    session.defaultSession.flushStorageData();
+  } catch {
+    // Ignore
+  }
+});
+
 app.on('before-quit', () => {
   isQuitting = true;
+  engine.flushSync();
 });
 
 app.on('will-quit', event => {
+  if (shutdownComplete) return;
   event.preventDefault();
-  void engine.shutdown().finally(() => {
-    app.exit(0);
-  });
+  if (!shutdownPromise) {
+    engine.flushSync();
+    const forceTimer = setTimeout(() => {
+      shutdownComplete = true;
+      app.quit();
+    }, 5000);
+    shutdownPromise = (async () => {
+      try {
+        await engine.shutdown();
+        session.defaultSession.flushStorageData();
+      } catch {
+        // Best-effort graceful shutdown
+      } finally {
+        clearTimeout(forceTimer);
+        flushAllStoresSync();
+        shutdownComplete = true;
+        app.quit();
+      }
+    })();
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -32,10 +32,6 @@ interface MediaPlayerProps {
     localPath?: string;
 }
 
-function isMp4Video(name: string): boolean {
-    return name.toLowerCase().endsWith('.mp4');
-}
-
 export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, totalItems, activeFolderId, ownerId, restart, onPlayFile, localPath }: MediaPlayerProps) {
     useTranslation();
     const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null);
@@ -104,12 +100,11 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
 
     const isVideo = isVideoFile(file.name);
     const isAudio = isAudioFile(file.name);
-    const isMp4 = isMp4Video(file.name);
 
     useEffect(() => {
         // The adaptive child owns its own controls. Keeping this listener alive
         // while it is mounted toggles playback twice for a single keypress.
-        if (isMp4 && streamUrl && !localPath) return;
+        if (isVideo && streamUrl && !localPath) return;
         const handleKeyDown = (e: KeyboardEvent) => {
             if (!shouldHandleMediaShortcut(e)) return;
 
@@ -156,10 +151,10 @@ export function MediaPlayer({ file, onClose, onNext, onPrev, currentIndex, total
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isMp4, streamUrl, localPath, onClose, onNext, onPrev, toggleFullscreen]);
+    }, [isVideo, streamUrl, localPath, onClose, onNext, onPrev, toggleFullscreen]);
 
-    // MP4 files: use adaptive streaming with quality controls + throttling
-    if (isMp4 && streamUrl && !localPath) {
+    // Remote videos: use full quality-controlled streaming player (360p through 4K + Original)
+    if (isVideo && streamUrl && !localPath) {
         return (
             <AdaptiveMediaPlayer
                 file={file}
