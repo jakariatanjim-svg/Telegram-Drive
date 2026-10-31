@@ -17,6 +17,7 @@ import {
 import { BaseTelegramClient, TelegramClient } from '@mtcute/core/client.js';
 import type { BasicDcOption } from '@mtcute/core/utils.js';
 import { WebCryptoProvider } from '@mtcute/web';
+import { getPortablePaths } from './portablePaths';
 
 export interface ProxySettingsConfig {
   enabled: boolean;
@@ -28,17 +29,16 @@ export interface ProxySettingsConfig {
   secret?: string;
 }
 
-export function atomicWriteFileSync(filePath: string, content: string | Buffer): void {
+const BACKUP_ENVELOPE_PREFIX = 'TD_BAK_V1:';
+const MAX_RESILIENT_BACKUP_BYTES = 16 * 1024 * 1024; // 16 MiB cap so backups stay compact inside <AppDir>/data/backups
+
+function writeRawAtomicSync(filePath: string, buf: Buffer): void {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
   const fd = fs.openSync(tmpPath, 'w', 0o600);
   try {
-    if (typeof content === 'string') {
-      fs.writeFileSync(fd, content, 'utf8');
-    } else {
-      fs.writeFileSync(fd, content);
-    }
+    fs.writeFileSync(fd, buf);
     try {
       fs.fsyncSync(fd);
     } catch {
@@ -50,10 +50,138 @@ export function atomicWriteFileSync(filePath: string, content: string | Buffer):
   try {
     fs.renameSync(tmpPath, filePath);
   } catch {
-    // Windows fallback if an antivirus scanner briefly holds destination open
     fs.copyFileSync(tmpPath, filePath);
     fs.rmSync(tmpPath, { force: true });
   }
+}
+
+function resolveBackupSlotPaths(filePath: string): { bak1: string; bak2: string } | null {
+  try {
+    const paths = getPortablePaths();
+    const resolvedTarget = path.resolve(filePath);
+    const norm = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
+    const targetNorm = norm(resolvedTarget);
+    const eligibleRoots = [paths.dbDir, paths.sessionDir, paths.storesDir].map(r => norm(path.resolve(r)));
+    const isEligible = eligibleRoots.some(r => targetNorm.startsWith(r.endsWith(path.sep) ? r : `${r}${path.sep}`));
+    if (!isEligible) return null;
+
+    const relFromData = path.relative(paths.dataRoot, resolvedTarget);
+    if (!relFromData || relFromData.startsWith('..')) return null;
+    const safeSlug = relFromData.replace(/[\\/]+/g, '__').replace(/[^a-zA-Z0-9._-]/g, '_');
+    fs.mkdirSync(paths.backupsDir, { recursive: true });
+    return {
+      bak1: path.join(paths.backupsDir, `${safeSlug}.bak1`),
+      bak2: path.join(paths.backupsDir, `${safeSlug}.bak2`),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function encodeBackupEnvelope(payload: Buffer): Buffer {
+  const sha = nodeCrypto.createHash('sha256').update(payload).digest('hex');
+  const header = Buffer.from(`${BACKUP_ENVELOPE_PREFIX}${sha}\n`, 'utf8');
+  return Buffer.concat([header, payload]);
+}
+
+function decodeAndVerifyBackupEnvelope(envelopePath: string): Buffer | null {
+  if (!fs.existsSync(envelopePath)) return null;
+  try {
+    const raw = fs.readFileSync(envelopePath);
+    const newlineIdx = raw.indexOf(0x0a); // '\n'
+    if (newlineIdx <= BACKUP_ENVELOPE_PREFIX.length) return null;
+    const header = raw.subarray(0, newlineIdx).toString('utf8');
+    if (!header.startsWith(BACKUP_ENVELOPE_PREFIX)) return null;
+    const expectedSha = header.slice(BACKUP_ENVELOPE_PREFIX.length).trim();
+    if (expectedSha.length !== 64) return null;
+    const payload = raw.subarray(newlineIdx + 1);
+    const actualSha = nodeCrypto.createHash('sha256').update(payload).digest('hex');
+    if (actualSha !== expectedSha) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function updatePowerCutBackupSlotsSync(filePath: string, payload: Buffer): void {
+  if (payload.byteLength === 0 || payload.byteLength > MAX_RESILIENT_BACKUP_BYTES) return;
+  const slots = resolveBackupSlotPaths(filePath);
+  if (!slots) return;
+  try {
+    // Only rotate .bak1 -> .bak2 if .bak1 currently holds a 100% checksum-verified snapshot.
+    const existingBak1 = decodeAndVerifyBackupEnvelope(slots.bak1);
+    if (existingBak1) {
+      writeRawAtomicSync(slots.bak2, encodeBackupEnvelope(existingBak1));
+    }
+    writeRawAtomicSync(slots.bak1, encodeBackupEnvelope(payload));
+  } catch {
+    // Best-effort backup rotation
+  }
+}
+
+export function readVerifiedBackupCandidates(filePath: string): Buffer[] {
+  const slots = resolveBackupSlotPaths(filePath);
+  if (!slots) return [];
+  const out: Buffer[] = [];
+  for (const candidate of [slots.bak1, slots.bak2]) {
+    const verified = decodeAndVerifyBackupEnvelope(candidate);
+    if (verified && verified.byteLength > 0) {
+      out.push(verified);
+    }
+  }
+  return out;
+}
+
+export function removeResilientBackupsSync(filePath: string): void {
+  const slots = resolveBackupSlotPaths(filePath);
+  if (!slots) return;
+  fs.rmSync(slots.bak1, { force: true });
+  fs.rmSync(slots.bak2, { force: true });
+}
+
+export function readResilientJsonFile<T>(
+  filePath: string,
+  validate?: (val: unknown) => val is T,
+): T | null {
+  const check = (buf: Buffer): T | null => {
+    try {
+      const parsed = JSON.parse(buf.toString('utf8')) as unknown;
+      if (parsed === null || typeof parsed !== 'object') return null;
+      if (validate && !validate(parsed)) return null;
+      return parsed as T;
+    } catch {
+      return null;
+    }
+  };
+
+  if (fs.existsSync(filePath)) {
+    try {
+      const primary = check(fs.readFileSync(filePath));
+      if (primary !== null) return primary;
+    } catch {
+      // Fall through to power-cut backup slots
+    }
+  }
+
+  for (const backupBuf of readVerifiedBackupCandidates(filePath)) {
+    const recovered = check(backupBuf);
+    if (recovered !== null) {
+      try {
+        writeRawAtomicSync(filePath, backupBuf);
+      } catch {
+        // Ignore write-back error
+      }
+      return recovered;
+    }
+  }
+
+  return null;
+}
+
+export function atomicWriteFileSync(filePath: string, content: string | Buffer): void {
+  const payload = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
+  writeRawAtomicSync(filePath, payload);
+  updatePowerCutBackupSlotsSync(filePath, payload);
 }
 
 class NodeMtProxyTransport extends BaseMtProxyTransport {
@@ -219,16 +347,39 @@ function getOrCreatePortableKey(sessionDir: string): Buffer {
 
   fs.mkdirSync(normalizedDir, { recursive: true });
   const keyFilePath = path.join(normalizedDir, 'portable.key');
+
+  const tryDecodeKey = (rawText: string): Buffer | null => {
+    try {
+      const decoded = Buffer.from(rawText.trim(), 'base64');
+      return decoded.length === 32 ? decoded : null;
+    } catch {
+      return null;
+    }
+  };
+
   if (fs.existsSync(keyFilePath)) {
     try {
-      const raw = fs.readFileSync(keyFilePath, 'utf8').trim();
-      const decoded = Buffer.from(raw, 'base64');
-      if (decoded.length === 32) {
+      const decoded = tryDecodeKey(fs.readFileSync(keyFilePath, 'utf8'));
+      if (decoded) {
         portableKeyCache.set(normalizedDir, decoded);
         return decoded;
       }
     } catch {
-      // Regenerate below if corrupted
+      // Check backup slots before generating a new key
+    }
+  }
+
+  // Power-cut auto-recovery: check verified backup slots before ever generating a new key
+  for (const backupBuf of readVerifiedBackupCandidates(keyFilePath)) {
+    const decoded = tryDecodeKey(backupBuf.toString('utf8'));
+    if (decoded) {
+      try {
+        writeRawAtomicSync(keyFilePath, backupBuf);
+      } catch {
+        // Ignore write-back error
+      }
+      portableKeyCache.set(normalizedDir, decoded);
+      return decoded;
     }
   }
 
@@ -267,10 +418,9 @@ export function writeEncryptedSecretFile(filePath: string, plaintext: string): v
   );
 }
 
-export function readEncryptedSecretFile(filePath: string): string | null {
-  if (!fs.existsSync(filePath)) return null;
+function decryptSecretBuffer(filePath: string, rawJson: string): string | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+    const parsed = JSON.parse(rawJson) as {
       scheme?: string;
       data?: string;
       iv?: string;
@@ -295,7 +445,6 @@ export function readEncryptedSecretFile(filePath: string): string | null {
 
     if (parsed.scheme === 'dpapi' && safeStorage.isEncryptionAvailable()) {
       const plain = safeStorage.decryptString(Buffer.from(parsed.data, 'base64'));
-      // Transparently upgrade legacy DPAPI secret file to portable-aes-gcm
       try {
         writeEncryptedSecretFile(filePath, plain);
       } catch {
@@ -326,6 +475,31 @@ export function readEncryptedSecretFile(filePath: string): string | null {
   } catch {
     return null;
   }
+  return null;
+}
+
+export function readEncryptedSecretFile(filePath: string): string | null {
+  if (fs.existsSync(filePath)) {
+    try {
+      const primary = decryptSecretBuffer(filePath, fs.readFileSync(filePath, 'utf8'));
+      if (primary !== null) return primary;
+    } catch {
+      // Fall through to power-cut backup recovery
+    }
+  }
+
+  for (const backupBuf of readVerifiedBackupCandidates(filePath)) {
+    const recovered = decryptSecretBuffer(filePath, backupBuf.toString('utf8'));
+    if (recovered !== null) {
+      try {
+        writeRawAtomicSync(filePath, backupBuf);
+      } catch {
+        // Ignore write-back error
+      }
+      return recovered;
+    }
+  }
+
   return null;
 }
 
@@ -625,6 +799,7 @@ export class PersistentMtprotoStorage extends MemoryStorage {
     this.peers.deleteAll();
     this.refMessages.deleteAll();
     fs.rmSync(this.storageFilePath, { force: true });
+    removeResilientBackupsSync(this.storageFilePath);
   }
 }
 

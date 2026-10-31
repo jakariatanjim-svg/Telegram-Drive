@@ -9,8 +9,14 @@ const MAX_BYTES = 128 * 1024 * 1024;
 let cacheGeneration = 0;
 const subscribers = new Set<() => void>();
 let owner: string | null = null;
+let dataSaverActive = false;
 let measuring = 0;
 const measurementQueue: Array<() => void> = [];
+
+export const setDataSaverActive = (active: boolean): void => {
+    dataSaverActive = active;
+};
+export const isDataSaverActive = (): boolean => dataSaverActive;
 
 export const getImageCacheKey = (fileId: number, folderId?: number | null): string =>
     JSON.stringify([owner, folderId ?? 'home', fileId]);
@@ -83,7 +89,10 @@ function load(variant: Variant, fileId: number, folderId?: number | null): Promi
 export const getCachedPreview = (fileId: number, folderId?: number | null): string | null => read(keyFor('preview', fileId, folderId));
 export const getCachedThumbnail = (fileId: number, folderId?: number | null): string | null => read(keyFor('thumbnail', fileId, folderId));
 export const loadPreview = (fileId: number, folderId?: number | null): Promise<string | null> => load('preview', fileId, folderId);
-export const loadThumbnail = (fileId: number, folderId?: number | null): Promise<string | null> => load('thumbnail', fileId, folderId);
+export const prefetchPreview = (fileId: number, folderId?: number | null): Promise<string | null> =>
+    dataSaverActive ? Promise.resolve(getCachedPreview(fileId, folderId)) : load('preview', fileId, folderId);
+export const loadThumbnail = (fileId: number, folderId?: number | null): Promise<string | null> =>
+    dataSaverActive ? Promise.resolve(getCachedThumbnail(fileId, folderId)) : load('thumbnail', fileId, folderId);
 export const forgetPreview = (fileId: number, folderId?: number | null): void => { cache.delete(keyFor('preview', fileId, folderId)); };
 export const forgetThumbnail = (fileId: number, folderId?: number | null): void => { cache.delete(keyFor('thumbnail', fileId, folderId)); };
 export const subscribeImageCache = (listener: () => void): (() => void) => { subscribers.add(listener); return () => { subscribers.delete(listener); }; };

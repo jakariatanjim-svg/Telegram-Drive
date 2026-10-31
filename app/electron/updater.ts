@@ -80,6 +80,7 @@ export async function downloadAndInstallWindowsUpdate(
   downloadUrl: string,
   assetName: string,
   onProgress: (percent: number) => void,
+  beforeExit?: () => Promise<void> | void,
 ): Promise<void> {
   if (!app.isPackaged) {
     await shell.openExternal(GITHUB_RELEASES_URL);
@@ -127,7 +128,21 @@ export async function downloadAndInstallWindowsUpdate(
 
   onProgress(100);
 
-  const installDir = paths.installDir;
+  // Flush all state, MTProto session keys, renderer stores, and power-cut backups
+  // BEFORE spawning the installer and exiting, since app.exit(0) bypasses will-quit hooks.
+  if (beforeExit) {
+    try {
+      await beforeExit();
+    } catch {
+      // Best-effort flush before exit
+    }
+  }
+
+  // Strip trailing slashes except drive roots (e.g. D:\) for NSIS /D= compatibility
+  const rawInstallDir = paths.installDir;
+  const installDir = /^[a-zA-Z]:[\\/]?$/.test(rawInstallDir)
+    ? rawInstallDir
+    : rawInstallDir.replace(/[\\/]+$/, '');
   const exePath = process.execPath;
   const pid = process.pid;
 

@@ -429,7 +429,17 @@
     "hide_passphrase": "پاس فریز چھپائیں",
     "current_vault_passphrase": "والٹ کا موجودہ پاس فریز",
     "videoFilenameCaption": "کیپشن میں فائل کا نام",
-    "videoFilenameCaptionDesc": "ویڈیو پیغامات میں اصل فائل کا نام شامل کریں۔ خفیہ کردہ اپ لوڈز میں نام نجی رہتا ہے۔"
+    "videoFilenameCaptionDesc": "ویڈیو پیغامات میں اصل فائل کا نام شامل کریں۔ خفیہ کردہ اپ لوڈز میں نام نجی رہتا ہے۔",
+    "ffmpeg_install_in_app": "ایپ کے اندر FFmpeg انسٹال کریں",
+    "ffmpeg_installing": "FFmpeg انسٹال ہو رہا ہے ({{percent}}%)…",
+    "ffmpeg_extracting": "data/bin میں FFmpeg ایکسٹریکٹ ہو رہا ہے…",
+    "ffmpeg_installed_ready": "FFmpeg مل گیا اور تیار ہے",
+    "ffmpeg_install_success": "FFmpeg کامیابی سے data/bin میں انسٹال ہو گیا ہے اور استعمال کے لیے تیار ہے۔",
+    "data_saver_mode": "ڈیٹا سیور",
+    "data_saver_desc": "موبائل ڈیٹا بچانے کے لیے بیک گراؤنڈ تھمب نیل لوڈنگ روکیں اور میڈیا بفر کو محدود رکھیں۔",
+    "notice_split_file": "بڑی فائل ({{name}}) خودکار طور پر {{count}} حصوں میں پروسیس ہو رہی ہے — یہ ایک ہی فائل کے طور پر نظر آئے گی۔",
+    "notice_ultra_low_ram": "کم ریم والا فون ملا: بڑی فائلوں کے لیے میموری سیف اسٹریمنگ فعال ہے، البتہ زیادہ ایپس چلنے پر معمولی بفرنگ ہو سکتی ہے۔",
+    "notice_mobile_data_large": "بڑی فائل ({{size}}) کے لیے موبائل ڈیٹا استعمال ہو رہا ہے۔ اضافی ڈیٹا بچانے کے لیے سیٹنگز میں ڈیٹا سیور آن کریں۔"
   },
   "files": {
     "download": "ڈاؤن لوڈ کریں۔",

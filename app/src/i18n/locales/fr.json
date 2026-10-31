@@ -430,7 +430,17 @@
     "encryption_experimental_inventory_many": "{{count}} fichiers chiffrés expérimentaux sont indexés localement. Leurs textes chiffrés ont été conservés.",
     "current_vault_passphrase": "Phrase secrète actuelle du coffre",
     "videoFilenameCaption": "Noms de fichier en légende",
-    "videoFilenameCaptionDesc": "Ajoutez le nom original aux messages vidéo. Les envois chiffrés gardent ce nom privé."
+    "videoFilenameCaptionDesc": "Ajoutez le nom original aux messages vidéo. Les envois chiffrés gardent ce nom privé.",
+    "ffmpeg_install_in_app": "Installer FFmpeg dans l’application",
+    "ffmpeg_installing": "Installation de FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Extraction de FFmpeg dans data/bin…",
+    "ffmpeg_installed_ready": "FFmpeg détecté et prêt",
+    "ffmpeg_install_success": "FFmpeg a été installé dans data/bin et est prêt à l’emploi.",
+    "data_saver_mode": "Économiseur de données",
+    "data_saver_desc": "Ignore le préchargement des miniatures en arrière-plan et limite la mémoire tampon multimédia pour économiser les données mobiles.",
+    "notice_split_file": "Le fichier volumineux ({{name}}) est traité automatiquement en {{count}} parties — il apparaîtra comme un seul fichier.",
+    "notice_ultra_low_ram": "Téléphone à faible RAM détecté : les gros fichiers utilisent un flux mémoire sécurisé, bien qu’un multitâche intensif puisse causer une légère mise en mémoire tampon.",
+    "notice_mobile_data_large": "Utilisation des données mobiles pour un fichier volumineux ({{size}}). Activez l’Économiseur de données dans les Paramètres pour réduire la consommation."
   },
   "files": {
     "download": "Télécharger",

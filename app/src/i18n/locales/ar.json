@@ -433,7 +433,17 @@
     "encryption_experimental_inventory_many": "يوجد {{count}} ملفًا تجريبيًا مشفرًا مفهرسًا محليًا، وقد تم الاحتفاظ بنصوصها المشفرة.",
     "current_vault_passphrase": "عبارة مرور الخزنة الحالية",
     "videoFilenameCaption": "أسماء الملفات في التسميات",
-    "videoFilenameCaptionDesc": "أضف اسم الملف الأصلي إلى رسائل الفيديو. تحافظ التحميلات المشفرة على خصوصيته."
+    "videoFilenameCaptionDesc": "أضف اسم الملف الأصلي إلى رسائل الفيديو. تحافظ التحميلات المشفرة على خصوصيته.",
+    "ffmpeg_install_in_app": "تثبيت FFmpeg داخل التطبيق",
+    "ffmpeg_installing": "جارٍ تثبيت FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "جارٍ استخراج FFmpeg إلى data/bin…",
+    "ffmpeg_installed_ready": "تم اكتشاف FFmpeg وهو جاهز",
+    "ffmpeg_install_success": "تم تثبيت FFmpeg داخل data/bin وهو جاهز للاستخدام.",
+    "data_saver_mode": "توفير البيانات",
+    "data_saver_desc": "تخطي التحميل المسبق للصور المصغرة في الخلفية وتقليل التخزين المؤقت للوسائط لتوفير بيانات الهاتف.",
+    "notice_split_file": "تتم معالجة الملف الكبير ({{name}}) تلقائياً على {{count}} أجزاء — وسيظهر كملف واحد.",
+    "notice_ultra_low_ram": "تم اكتشاف هاتف بذاكرة عشوائية منخفضة: تُبث الملفات الكبيرة بأجزاء آمنة للذاكرة، وقد يحدث تحميل مؤقت طفيف مع تعدد المهام الثقيل.",
+    "notice_mobile_data_large": "يتم استخدام بيانات الهاتف لملف كبير ({{size}}). يمكنك تفعيل وضع توفير البيانات من الإعدادات لتقليل الاستهلاك."
   },
   "files": {
     "download": "تنزيل",

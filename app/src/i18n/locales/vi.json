@@ -429,7 +429,17 @@
     "hide_passphrase": "Ẩn cụm mật khẩu",
     "current_vault_passphrase": "Mật khẩu kho hiện tại",
     "videoFilenameCaption": "Tên tệp trong chú thích",
-    "videoFilenameCaptionDesc": "Thêm tên tệp gốc vào tin nhắn video. Nội dung tải lên được mã hóa sẽ giữ tên riêng tư."
+    "videoFilenameCaptionDesc": "Thêm tên tệp gốc vào tin nhắn video. Nội dung tải lên được mã hóa sẽ giữ tên riêng tư.",
+    "ffmpeg_install_in_app": "Cài đặt FFmpeg ngay trong ứng dụng",
+    "ffmpeg_installing": "Đang cài đặt FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Đang giải nén FFmpeg vào data/bin…",
+    "ffmpeg_installed_ready": "Đã phát hiện FFmpeg & sẵn sàng",
+    "ffmpeg_install_success": "FFmpeg đã được cài vào data/bin và sẵn sàng sử dụng.",
+    "data_saver_mode": "Tiết kiệm dữ liệu",
+    "data_saver_desc": "Bỏ qua tải trước ảnh thu nhỏ chạy nền và giới hạn bộ đệm phát để tiết kiệm dữ liệu di động.",
+    "notice_split_file": "Tệp lớn ({{name}}) đang được xử lý tự động thành {{count}} phần — tệp vẫn hiển thị như một tệp duy nhất.",
+    "notice_ultra_low_ram": "Phát hiện điện thoại ít RAM: tệp lớn dùng chế độ truyền theo khối an toàn bộ nhớ, nhưng chạy đa nhiệm nặng có thể gây trễ nhẹ.",
+    "notice_mobile_data_large": "Đang dùng dữ liệu di động cho tệp lớn ({{size}}). Bật Tiết kiệm dữ liệu trong Cài đặt bất cứ lúc nào để giảm dung lượng tiêu thụ."
   },
   "files": {
     "download": "Tải xuống",

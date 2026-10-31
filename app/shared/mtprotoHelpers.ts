@@ -21,12 +21,15 @@ export function guessMimeType(filename: string): string {
     webm: 'video/webm',
     mov: 'video/quicktime',
     avi: 'video/x-msvideo',
+    m4v: 'video/mp4',
+    ts: 'video/mp2t',
     mp3: 'audio/mpeg',
     m4a: 'audio/mp4',
     flac: 'audio/flac',
     wav: 'audio/wav',
     ogg: 'audio/ogg',
     opus: 'audio/opus',
+    aac: 'audio/aac',
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',
     png: 'image/png',
@@ -36,6 +39,11 @@ export function guessMimeType(filename: string): string {
     bmp: 'image/bmp',
     pdf: 'application/pdf',
     zip: 'application/zip',
+    rar: 'application/vnd.rar',
+    '7z': 'application/x-7z-compressed',
+    tar: 'application/x-tar',
+    gz: 'application/gzip',
+    iso: 'application/x-iso9660-image',
     json: 'application/json',
     txt: 'text/plain',
     md: 'text/markdown',
@@ -43,6 +51,7 @@ export function guessMimeType(filename: string): string {
     html: 'text/html',
     apk: 'application/vnd.android.package-archive',
     exe: 'application/vnd.microsoft.portable-executable',
+    msi: 'application/x-msi',
   };
   return map[ext] ?? 'application/octet-stream';
 }
@@ -109,6 +118,8 @@ export interface MappedTelegramFile {
   vault_id?: string | null;
   protect_metadata?: boolean;
   caption?: string;
+  is_split?: boolean;
+  split_parts_count?: number;
 }
 
 export function mapMessageToTelegramFile(
@@ -123,6 +134,7 @@ export function mapMessageToTelegramFile(
 ): MappedTelegramFile | null {
   if (!msg || !msg.media) return null;
   if (msg.text && msg.text.startsWith(SETTINGS_SYNC_MARKER)) return null;
+  if (msg.text && msg.text.startsWith('#TG_SPLIT_PART_V1:')) return null;
 
   const media = msg.media as unknown as {
     type?: string;

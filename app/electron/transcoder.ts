@@ -84,58 +84,468 @@ export interface CacheEntryRecord {
   playlist_exists: boolean;
 }
 
-let cachedFfmpegPath: string | null | undefined;
+export interface FfmpegDetectionDetails {
+  available: boolean;
+  executablePath: string | null;
+  source: 'portable' | 'system' | null;
+  version: string | null;
+}
 
-export function resolveFfmpegExecutable(): string | null {
-  if (cachedFfmpegPath !== undefined) return cachedFfmpegPath;
+export interface FfmpegInstallProgressPayload {
+  status: 'idle' | 'downloading' | 'extracting' | 'verifying' | 'completed' | 'error' | 'cancelled';
+  percent: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  error?: string | null;
+}
 
-  const paths = getPortablePaths();
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const localCandidates = [
-    path.join(paths.installDir, `ffmpeg${ext}`),
-    path.join(paths.installDir, 'bin', `ffmpeg${ext}`),
-    path.join(paths.dataRoot, 'bin', `ffmpeg${ext}`),
-    path.join(process.resourcesPath ?? '', `ffmpeg${ext}`),
-  ];
+let cachedFfmpegDetails: FfmpegDetectionDetails | undefined;
+let activeFfmpegInstallAbort: AbortController | null = null;
+let currentFfmpegInstallProgress: FfmpegInstallProgressPayload = {
+  status: 'idle',
+  percent: 0,
+  downloadedBytes: 0,
+  totalBytes: 0,
+  error: null,
+};
 
-  if (process.platform === 'win32') {
-    const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
-    const programData = process.env.ProgramData ?? 'C:\\ProgramData';
-    localCandidates.push(
-      path.join(localAppData, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
-      path.join(programData, 'chocolatey', 'bin', 'ffmpeg.exe'),
-      path.join(os.homedir(), 'scoop', 'shims', 'ffmpeg.exe'),
-      'C:\\ffmpeg\\bin\\ffmpeg.exe',
-    );
-  }
-
-  for (const candidate of localCandidates) {
-    if (candidate && fs.existsSync(candidate)) {
-      cachedFfmpegPath = candidate;
-      return candidate;
-    }
-  }
-
+function probeFfmpegBinary(candidate: string): string | null {
   try {
-    const res = childProcess.spawnSync('ffmpeg', ['-version'], {
-      stdio: 'ignore',
-      timeout: 2500,
+    const res = childProcess.spawnSync(candidate, ['-version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000,
       windowsHide: true,
     });
     if (res.status === 0) {
-      cachedFfmpegPath = 'ffmpeg';
-      return 'ffmpeg';
+      const firstLine = String(res.stdout ?? '').split(/\r?\n/)[0] ?? '';
+      const verMatch = /ffmpeg version\s+([^\s]+)/i.exec(firstLine);
+      return verMatch ? verMatch[1] : 'detected';
     }
   } catch {
-    // Not in PATH
+    // Not runnable
   }
-
-  cachedFfmpegPath = null;
   return null;
 }
 
+function findFfmpegInDirectoryRecursive(rootDir: string, maxDepth: number): string | null {
+  if (!rootDir || !fs.existsSync(rootDir) || maxDepth < 0) return null;
+  const targetName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  const directBin = path.join(rootDir, 'bin', targetName);
+  if (fs.existsSync(directBin)) return directBin;
+  const directRoot = path.join(rootDir, targetName);
+  if (fs.existsSync(directRoot)) return directRoot;
+  if (maxDepth === 0) return null;
+
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const found = findFfmpegInDirectoryRecursive(path.join(rootDir, ent.name), maxDepth - 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function readWindowsRegistryPathEntries(): string[] {
+  if (process.platform !== 'win32') return [];
+  const dirs: string[] = [];
+  const queries = [
+    ['HKCU\\Environment', 'Path'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment', 'Path'],
+  ];
+  for (const [key, valueName] of queries) {
+    try {
+      const res = childProcess.spawnSync('reg.exe', ['query', key, '/v', valueName], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+        windowsHide: true,
+      });
+      if (res.status === 0 && res.stdout) {
+        for (const line of res.stdout.split(/\r?\n/)) {
+          const match = /REG_(?:EXPAND_)?SZ\s+(.+)$/i.exec(line.trim());
+          if (match?.[1]) {
+            for (const rawPart of match[1].split(';')) {
+              const expanded = rawPart
+                .trim()
+                .replace(/^"|"$/g, '')
+                .replace(/%([^%]+)%/g, (_m, envName: string) => process.env[envName] ?? '');
+              if (expanded) dirs.push(expanded);
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore registry read failure
+    }
+  }
+  return dirs;
+}
+
+export function resolveFfmpegDetails(): FfmpegDetectionDetails {
+  if (cachedFfmpegDetails !== undefined) return cachedFfmpegDetails;
+
+  const paths = getPortablePaths();
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const targetName = `ffmpeg${ext}`;
+
+  // 1. Portable / app-bundled locations
+  const portableCandidates = [
+    path.join(paths.binDir, targetName),
+    path.join(paths.dataRoot, 'bin', targetName),
+    path.join(paths.installDir, targetName),
+    path.join(paths.installDir, 'bin', targetName),
+    path.join(process.resourcesPath ?? '', targetName),
+  ];
+
+  for (const candidate of portableCandidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      const version = probeFfmpegBinary(candidate);
+      if (version) {
+        cachedFfmpegDetails = {
+          available: true,
+          executablePath: candidate,
+          source: 'portable',
+          version,
+        };
+        return cachedFfmpegDetails;
+      }
+    }
+  }
+
+  // 2. Pre-installed PC locations (CMD / PowerShell / WinGet / Chocolatey / Scoop / Installers / Registry PATH)
+  const systemCandidates: string[] = [];
+  if (process.platform === 'win32') {
+    const home = os.homedir();
+    const localAppData = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local');
+    const programData = process.env.ProgramData ?? 'C:\\ProgramData';
+    const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
+    const programFilesX86 = process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)';
+
+    systemCandidates.push(
+      path.join(localAppData, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
+      path.join(programData, 'chocolatey', 'bin', 'ffmpeg.exe'),
+      path.join(programData, 'chocolatey', 'lib', 'ffmpeg', 'tools', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(home, 'scoop', 'shims', 'ffmpeg.exe'),
+      path.join(home, 'scoop', 'apps', 'ffmpeg', 'current', 'bin', 'ffmpeg.exe'),
+      'C:\\ffmpeg\\bin\\ffmpeg.exe',
+      'C:\\ffmpeg\\ffmpeg.exe',
+      path.join(programFiles, 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(programFiles, 'FFmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(programFilesX86, 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(home, 'ffmpeg', 'bin', 'ffmpeg.exe'),
+    );
+
+    // Scan WinGet Packages folder directly (catches freshly installed winget FFmpeg even before PATH refreshes)
+    const wingetPkgsDir = path.join(localAppData, 'Microsoft', 'WinGet', 'Packages');
+    if (fs.existsSync(wingetPkgsDir)) {
+      try {
+        for (const ent of fs.readdirSync(wingetPkgsDir, { withFileTypes: true })) {
+          if (ent.isDirectory() && /ffmpeg/i.test(ent.name)) {
+            const found = findFfmpegInDirectoryRecursive(path.join(wingetPkgsDir, ent.name), 3);
+            if (found) systemCandidates.push(found);
+          }
+        }
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Check current process PATH + live Windows Registry PATH (HKCU + HKLM)
+    const pathDirs = [
+      ...(process.env.PATH ?? '').split(path.delimiter),
+      ...readWindowsRegistryPathEntries(),
+    ];
+    for (const dir of pathDirs) {
+      const clean = dir.trim().replace(/^"|"$/g, '');
+      if (clean) {
+        systemCandidates.push(path.join(clean, 'ffmpeg.exe'));
+      }
+    }
+
+    // Also ask where.exe as final Windows locator
+    try {
+      const whereRes = childProcess.spawnSync('where.exe', ['ffmpeg'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+        windowsHide: true,
+      });
+      if (whereRes.status === 0 && whereRes.stdout) {
+        for (const line of whereRes.stdout.split(/\r?\n/)) {
+          const clean = line.trim();
+          if (clean && fs.existsSync(clean)) systemCandidates.push(clean);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  } else {
+    for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+      if (dir.trim()) systemCandidates.push(path.join(dir.trim(), 'ffmpeg'));
+    }
+  }
+
+  const seen = new Set<string>();
+  for (const candidate of systemCandidates) {
+    if (!candidate) continue;
+    const normKey = process.platform === 'win32' ? candidate.toLowerCase() : candidate;
+    if (seen.has(normKey)) continue;
+    seen.add(normKey);
+    if (fs.existsSync(candidate)) {
+      const version = probeFfmpegBinary(candidate);
+      if (version) {
+        cachedFfmpegDetails = {
+          available: true,
+          executablePath: candidate,
+          source: 'system',
+          version,
+        };
+        return cachedFfmpegDetails;
+      }
+    }
+  }
+
+  const bareVersion = probeFfmpegBinary('ffmpeg');
+  if (bareVersion) {
+    cachedFfmpegDetails = {
+      available: true,
+      executablePath: 'ffmpeg',
+      source: 'system',
+      version: bareVersion,
+    };
+    return cachedFfmpegDetails;
+  }
+
+  cachedFfmpegDetails = {
+    available: false,
+    executablePath: null,
+    source: null,
+    version: null,
+  };
+  return cachedFfmpegDetails;
+}
+
+export function resolveFfmpegExecutable(): string | null {
+  return resolveFfmpegDetails().executablePath;
+}
+
 export function resetFfmpegDetectionCache(): void {
-  cachedFfmpegPath = undefined;
+  cachedFfmpegDetails = undefined;
+}
+
+export function getFfmpegInstallState(): FfmpegInstallProgressPayload {
+  return { ...currentFfmpegInstallProgress };
+}
+
+export function cancelPortableFfmpegInstall(): void {
+  activeFfmpegInstallAbort?.abort();
+}
+
+async function resolveOfficialWindowsFfmpegZipUrl(signal: AbortSignal): Promise<string> {
+  const fallbackDirectUrl =
+    'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
+  try {
+    const res = await fetch('https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest', {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'Telegram-Drive-FFmpeg-Installer',
+      },
+      signal,
+    });
+    if (!res.ok) return fallbackDirectUrl;
+    const json = (await res.json()) as {
+      assets?: Array<{ name?: string; browser_download_url?: string }>;
+    };
+    const assets = Array.isArray(json.assets) ? json.assets : [];
+    const preferred =
+      assets.find(
+        a =>
+          typeof a.name === 'string' &&
+          /win64-gpl(?:-[\d.]+)?\.zip$/i.test(a.name) &&
+          !/shared|vulkan/i.test(a.name) &&
+          typeof a.browser_download_url === 'string',
+      ) ??
+      assets.find(
+        a =>
+          typeof a.name === 'string' &&
+          /win64.*\.zip$/i.test(a.name) &&
+          !/shared/i.test(a.name) &&
+          typeof a.browser_download_url === 'string',
+      );
+    return preferred?.browser_download_url || fallbackDirectUrl;
+  } catch {
+    return fallbackDirectUrl;
+  }
+}
+
+export async function installPortableFfmpeg(
+  onProgress: (payload: FfmpegInstallProgressPayload) => void,
+): Promise<FfmpegDetectionDetails> {
+  // First re-check PC in case FFmpeg was already installed!
+  resetFfmpegDetectionCache();
+  const already = resolveFfmpegDetails();
+  if (already.available) {
+    const donePayload: FfmpegInstallProgressPayload = {
+      status: 'completed',
+      percent: 100,
+      downloadedBytes: 0,
+      totalBytes: 0,
+      error: null,
+    };
+    currentFfmpegInstallProgress = donePayload;
+    onProgress(donePayload);
+    return already;
+  }
+
+  if (process.platform !== 'win32') {
+    throw new Error('In-app portable FFmpeg installer is supported on Windows.');
+  }
+
+  if (activeFfmpegInstallAbort) {
+    throw new Error('FFmpeg installation is already in progress.');
+  }
+
+  const paths = getPortablePaths();
+  fs.mkdirSync(paths.tempDir, { recursive: true });
+  fs.mkdirSync(paths.binDir, { recursive: true });
+
+  const zipDestPath = path.join(paths.tempDir, `ffmpeg-portable-${process.pid}.zip`);
+  const abort = new AbortController();
+  activeFfmpegInstallAbort = abort;
+
+  const emit = (patch: Partial<FfmpegInstallProgressPayload>) => {
+    currentFfmpegInstallProgress = {
+      ...currentFfmpegInstallProgress,
+      ...patch,
+    };
+    onProgress({ ...currentFfmpegInstallProgress });
+  };
+
+  try {
+    emit({ status: 'downloading', percent: 1, downloadedBytes: 0, totalBytes: 0, error: null });
+
+    const downloadUrl = await resolveOfficialWindowsFfmpegZipUrl(abort.signal);
+    const resp = await fetch(downloadUrl, {
+      headers: { 'User-Agent': 'Telegram-Drive-FFmpeg-Installer' },
+      signal: abort.signal,
+    });
+    if (!resp.ok || !resp.body) {
+      throw new Error(`Download failed (HTTP ${resp.status})`);
+    }
+
+    const totalBytes = Number.parseInt(resp.headers.get('content-length') ?? '0', 10) || 0;
+    let downloadedBytes = 0;
+
+    const outStream = fs.createWriteStream(zipDestPath);
+    const reader = resp.body.getReader();
+
+    try {
+      for (;;) {
+        if (abort.signal.aborted) throw new Error('CANCELLED');
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          downloadedBytes += value.byteLength;
+          outStream.write(Buffer.from(value));
+          const pct =
+            totalBytes > 0
+              ? Math.min(90, Math.max(1, Math.round((downloadedBytes / totalBytes) * 90)))
+              : 45;
+          emit({
+            status: 'downloading',
+            percent: pct,
+            downloadedBytes,
+            totalBytes,
+          });
+        }
+      }
+    } finally {
+      await new Promise<void>(resolve => outStream.end(() => resolve()));
+    }
+
+    if (abort.signal.aborted) throw new Error('CANCELLED');
+    const stat = fs.statSync(zipDestPath);
+    if (stat.size < 5 * 1024 * 1024) {
+      throw new Error('Downloaded FFmpeg archive is incomplete.');
+    }
+
+    emit({
+      status: 'extracting',
+      percent: 94,
+      downloadedBytes: stat.size,
+      totalBytes: totalBytes || stat.size,
+    });
+
+    const psEsc = (s: string) => s.replace(/'/g, "''");
+    const extractScript = [
+      `$ErrorActionPreference = 'Stop'`,
+      `Add-Type -AssemblyName System.IO.Compression.FileSystem`,
+      `$zip = [System.IO.Compression.ZipFile]::OpenRead('${psEsc(zipDestPath)}')`,
+      `try {`,
+      `  foreach ($entry in $zip.Entries) {`,
+      `    if ($entry.Name -ieq 'ffmpeg.exe' -or $entry.Name -ieq 'ffprobe.exe') {`,
+      `      $tmpOut = Join-Path '${psEsc(paths.binDir)}' ($entry.Name + '.tmp')`,
+      `      $finalOut = Join-Path '${psEsc(paths.binDir)}' $entry.Name`,
+      `      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tmpOut, $true)`,
+      `      Move-Item -LiteralPath $tmpOut -Destination $finalOut -Force`,
+      `    }`,
+      `  }`,
+      `} finally {`,
+      `  $zip.Dispose()`,
+      `}`,
+    ].join('; ');
+
+    await new Promise<void>((resolve, reject) => {
+      const child = childProcess.spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-Command', extractScript],
+        { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
+      );
+      let stderr = '';
+      child.stderr?.on('data', chunk => {
+        stderr += String(chunk);
+      });
+      child.on('error', err => reject(err));
+      child.on('close', code => {
+        if (code === 0) resolve();
+        else reject(new Error(stderr.trim() || `Archive extraction exited with code ${code}`));
+      });
+    });
+
+    emit({ status: 'verifying', percent: 98 });
+
+    resetFfmpegDetectionCache();
+    const verified = resolveFfmpegDetails();
+    if (!verified.available) {
+      throw new Error('FFmpeg binary could not be verified after extraction.');
+    }
+
+    emit({
+      status: 'completed',
+      percent: 100,
+      downloadedBytes: stat.size,
+      totalBytes: totalBytes || stat.size,
+      error: null,
+    });
+    return verified;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isCancelled = abort.signal.aborted || msg === 'CANCELLED';
+    emit({
+      status: isCancelled ? 'cancelled' : 'error',
+      error: isCancelled ? null : msg,
+    });
+    throw err;
+  } finally {
+    activeFfmpegInstallAbort = null;
+    fs.rmSync(zipDestPath, { force: true });
+  }
 }
 
 export class VideoTranscodeManager {
@@ -155,17 +565,21 @@ export class VideoTranscodeManager {
   }
 
   public getCapabilities(maxCacheGb: number) {
-    // Re-check PATH if previously unavailable so newly installed FFmpeg is picked up automatically
-    if (!cachedFfmpegPath) {
+    // Re-check PC locations if previously unavailable so newly installed FFmpeg is picked up automatically
+    if (!cachedFfmpegDetails?.available) {
       resetFfmpegDetectionCache();
     }
-    const ffmpegBin = resolveFfmpegExecutable();
-    const available = Boolean(ffmpegBin);
+    const details = resolveFfmpegDetails();
+    const available = details.available;
     const cacheInfo = this.scanCache(maxCacheGb);
 
     return {
       available,
       ffmpeg_available: available,
+      ffmpeg_source: details.source,
+      ffmpeg_version: details.version,
+      ffmpeg_path: details.executablePath,
+      install_state: getFfmpegInstallState(),
       hardware_encoder: null,
       mode: available ? ('hls' as const) : ('original' as const),
       variants: Object.values(TRANSCODE_PRESETS).map(preset => ({
@@ -352,6 +766,7 @@ export class VideoTranscodeManager {
   public async prepareTranscode(params: {
     fileKey: string;
     quality: string;
+    directInputUrl?: string;
     ensureSourceCached: (targetPath: string, onProgress: (pct: number) => void) => Promise<void>;
   }): Promise<{
     job_id: string;
@@ -429,22 +844,28 @@ export class VideoTranscodeManager {
     void (async () => {
       try {
         fs.mkdirSync(outDir, { recursive: true });
-        const sourcePath = path.join(fkDir, 'source.media');
-        if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size === 0) {
-          await params.ensureSourceCached(sourcePath, pct => {
-            job.status = 'caching';
-            job.progress = Math.min(0.45, Math.max(0.02, (pct / 100) * 0.45));
-          });
+        let inputSource = params.directInputUrl ?? '';
+        if (!inputSource) {
+          const sourcePath = path.join(fkDir, 'source.media');
+          if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size === 0) {
+            await params.ensureSourceCached(sourcePath, pct => {
+              job.status = 'caching';
+              job.progress = Math.min(0.45, Math.max(0.02, (pct / 100) * 0.45));
+            });
+          }
+          inputSource = sourcePath;
         }
 
         job.status = 'transcoding';
-        job.progress = 0.5;
+        job.progress = params.directInputUrl ? 0.15 : 0.5;
 
         const segPattern = path.join(outDir, 'seg_%04d.ts');
+        const inputArgs = params.directInputUrl
+          ? ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', '-i', inputSource]
+          : ['-i', inputSource];
         const args = [
           '-y',
-          '-i',
-          sourcePath,
+          ...inputArgs,
           '-vf',
           `scale=-2:${preset.height}`,
           '-c:v',
@@ -515,6 +936,7 @@ export class VideoTranscodeManager {
 
   public async prepareFmp4Remux(params: {
     fileKey: string;
+    directInputUrl?: string;
     ensureSourceCached: (targetPath: string) => Promise<void>;
   }): Promise<{ url: string; output_file_key: string; status: string }> {
     const ffmpegBin = resolveFfmpegExecutable();
@@ -541,18 +963,24 @@ export class VideoTranscodeManager {
     void (async () => {
       try {
         fs.mkdirSync(fkDir, { recursive: true });
-        const sourcePath = path.join(fkDir, 'source.media');
-        if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size === 0) {
-          await params.ensureSourceCached(sourcePath);
+        let inputSource = params.directInputUrl ?? '';
+        if (!inputSource) {
+          const sourcePath = path.join(fkDir, 'source.media');
+          if (!fs.existsSync(sourcePath) || fs.statSync(sourcePath).size === 0) {
+            await params.ensureSourceCached(sourcePath);
+          }
+          inputSource = sourcePath;
         }
         const tmpOut = `${outFile}.tmp`;
+        const inputArgs = params.directInputUrl
+          ? ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', '-i', inputSource]
+          : ['-i', inputSource];
         await new Promise<void>((resolve, reject) => {
           const proc = childProcess.spawn(
             ffmpegBin,
             [
               '-y',
-              '-i',
-              sourcePath,
+              ...inputArgs,
               '-c',
               'copy',
               '-movflags',

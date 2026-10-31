@@ -16,6 +16,8 @@ export interface TelegramFile {
   is_pinned?: boolean;
   last_opened_at?: number;
   offline_available?: boolean;
+  is_split?: boolean;
+  split_parts_count?: number;
 }
 
 export type SmartView = 'recents' | 'favorites' | 'pinned' | 'offline' | 'large' | 'old' | 'duplicates';
