@@ -21,6 +21,23 @@ import {
   type MappedTelegramFile,
 } from '../../shared/mtprotoHelpers';
 import {
+  SPLIT_PART_SIZE_BYTES,
+  buildSplitManifestCaption,
+  buildSplitManifestFileName,
+  buildSplitPartCaption,
+  buildSplitPartFileName,
+  computeSplitPartPlan,
+  isSplitPartMessage,
+  mapSplitManifestToTelegramFile,
+  parseSplitManifestFromMessage,
+  parseSplitManifestJsonBytes,
+  resolveRangeAcrossParts,
+  shouldSplitUpload,
+  type SplitFileManifest,
+  type SplitPartDescriptor,
+  type SplitUploadCheckpoint,
+} from '../../shared/splitFiles';
+import {
   GITHUB_LATEST_RELEASE_API,
   GITHUB_RELEASES_URL,
   compareVersions,
@@ -30,10 +47,109 @@ import {
   type GithubLatestReleasePayload,
 } from '../../shared/versioning';
 import { dispatchLocalEvent } from './eventBus';
-import { isAndroidNative, TelegramDriveNative } from './nativeBridge';
+import { isAndroidNative, TelegramDriveNative, type MediaStreamRequestEvent } from './nativeBridge';
 import { runRobustQrSignIn } from '../../shared/qrAuthLoop';
 
 const STATE_STORAGE_KEY = 'telegram_drive_android_state_v1';
+const STATE_BOOTSTRAP_KEY = 'telegram_drive_android_boot_v2';
+const ANDROID_IDB_NAME = 'telegram-drive-android-state-db';
+const ANDROID_IDB_STORE = 'kv';
+const ANDROID_IDB_STATE_KEY = 'state_v2';
+const ANDROID_ENCRYPTED_SPLIT_PART_LOW_RAM = 64 * 1024 * 1024; // 64 MiB on <3.2 GiB RAM phones
+const ANDROID_ENCRYPTED_SPLIT_PART_NORMAL = 128 * 1024 * 1024; // 128 MiB on 4 GB+ RAM phones
+
+function openAndroidStateDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('INDEXEDDB_UNAVAILABLE'));
+      return;
+    }
+    const req = indexedDB.open(ANDROID_IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(ANDROID_IDB_STORE)) {
+        db.createObjectStore(ANDROID_IDB_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error('INDEXEDDB_OPEN_FAILED'));
+  });
+}
+
+async function idbGetState<T>(key: string): Promise<T | null> {
+  const db = await openAndroidStateDb();
+  try {
+    return await new Promise<T | null>((resolve, reject) => {
+      const tx = db.transaction(ANDROID_IDB_STORE, 'readonly');
+      const store = tx.objectStore(ANDROID_IDB_STORE);
+      const req = store.get(key);
+      req.onsuccess = () => resolve((req.result as T | undefined) ?? null);
+      req.onerror = () => reject(req.error ?? new Error('INDEXEDDB_GET_FAILED'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function idbSetState<T>(key: string, value: T): Promise<void> {
+  const db = await openAndroidStateDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(ANDROID_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(ANDROID_IDB_STORE);
+      store.put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('INDEXEDDB_SET_FAILED'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function idbClearState(): Promise<void> {
+  const db = await openAndroidStateDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(ANDROID_IDB_STORE, 'readwrite');
+      tx.objectStore(ANDROID_IDB_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('INDEXEDDB_CLEAR_FAILED'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function isTransientAndroidError(err: unknown): boolean {
+  const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+  if (/ABORT|CANCEL|FILE_UNREADABLE|VAULT_LOCKED|PASSPHRASE|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|MESSAGE_NOT_FOUND|MEDIA_NOT_FOUND|ENOSPC|No space left/i.test(text)) {
+    return false;
+  }
+  return /TIMEOUT|TIMED_OUT|NETWORK|DISCONNECT|SOCKET|FETCH|RESET|ECONN|EOF|CONNECTION|FLOOD_WAIT|502|503|504|WebSocket|Failed to fetch/i.test(
+    text,
+  ) || (typeof navigator !== 'undefined' && navigator.onLine === false);
+}
+
+async function waitOnlineOrDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('ABORTED');
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener('online', onOnline);
+      signal?.removeEventListener('abort', onAbort);
+      if (err) reject(err);
+      else resolve();
+    };
+    const onOnline = () => finish();
+    const onAbort = () => finish(new Error('ABORTED'));
+    const timer = window.setTimeout(() => finish(), ms);
+    window.addEventListener('online', onOnline, { once: true });
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 interface AndroidPersistedState {
   deviceId: string;
@@ -81,6 +197,10 @@ interface AndroidPersistedState {
     encryptedFiles: EncryptedFileRecord[];
   };
   bandwidth: { uploaded: number; downloaded: number };
+  splitManifests?: Record<string, SplitFileManifest>;
+  splitUploadCheckpoints?: Record<string, SplitUploadCheckpoint>;
+  ultraLowRamNoticeShown?: boolean;
+  dataSaverEnabled?: boolean;
 }
 
 function folderIdToPeer(folderId: number | null | undefined): 'self' | number {
@@ -118,7 +238,15 @@ class AndroidWebEngine {
   private filesCache = new Map<string, MappedTelegramFile[]>();
   private blobUrlCache = new Map<string, string>();
   private activeAborts = new Map<string, AbortController>();
+  private explicitlyCancelledTransfers = new Set<string>();
   private pendingFilesByPath = new Map<string, File>();
+  private stateHydratedPromise: Promise<void>;
+  private saveDebounceTimer: number | null = null;
+  private mobileDataNoticeShownInSession = false;
+  private cachedUltraLowRam: boolean | null = null;
+  private cachedSystemDataSaver = false;
+  private mediaServerPromise: Promise<{ port: number; token: string; baseUrl: string }> | null = null;
+  private activeMediaStreamAborts = new Map<string, AbortController>();
 
   private pendingAuth: {
     phone?: string;
@@ -148,12 +276,54 @@ class AndroidWebEngine {
 
   constructor() {
     this.state = this.loadState();
+    this.applyHydratedState(this.state);
+    this.stateHydratedPromise = this.hydrateStateFromIndexedDb();
+    if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
+      void navigator.storage.persist().catch(() => undefined);
+    }
+  }
+
+  private applyHydratedState(next: AndroidPersistedState): void {
+    this.state = next;
+    if (!this.state.splitManifests) this.state.splitManifests = {};
+    if (!this.state.splitUploadCheckpoints) this.state.splitUploadCheckpoints = {};
     this.currentUserId = this.state.lastUserId ?? null;
+    this.filesCache.clear();
     const savedFiles = this.state.cachedFilesByFolder ?? {};
     for (const [k, files] of Object.entries(savedFiles)) {
       if (Array.isArray(files)) this.filesCache.set(k, files);
     }
     this.vault.loadPersisted(this.state.vaultData);
+  }
+
+  private async hydrateStateFromIndexedDb(): Promise<void> {
+    try {
+      const idbStored = await idbGetState<Partial<AndroidPersistedState>>(ANDROID_IDB_STATE_KEY);
+      if (idbStored && typeof idbStored === 'object') {
+        const merged: AndroidPersistedState = {
+          ...this.state,
+          ...idbStored,
+        };
+        this.applyHydratedState(merged);
+        // Remove legacy oversized localStorage entry once IndexedDB is authoritative
+        try {
+          localStorage.removeItem(STATE_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
+      // First run after upgrade: migrate existing localStorage state into IndexedDB
+      await idbSetState(ANDROID_IDB_STATE_KEY, this.state);
+      try {
+        localStorage.removeItem(STATE_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    } catch {
+      // Fallback gracefully if IndexedDB is unavailable in restricted environment
+    }
   }
 
   public registerBrowserSelectedFile(pseudoPath: string, file: File): void {
@@ -188,12 +358,17 @@ class AndroidWebEngine {
         encryptedFiles: [],
       },
       bandwidth: { uploaded: 0, downloaded: 0 },
+      splitManifests: {},
+      splitUploadCheckpoints: {},
+      ultraLowRamNoticeShown: false,
+      dataSaverEnabled: false,
     };
     try {
-      const raw = localStorage.getItem(STATE_STORAGE_KEY);
-      if (raw) {
-        return { ...defaults, ...(JSON.parse(raw) as Partial<AndroidPersistedState>) };
-      }
+      const bootRaw = localStorage.getItem(STATE_BOOTSTRAP_KEY);
+      const legacyRaw = localStorage.getItem(STATE_STORAGE_KEY);
+      const parsedBoot = bootRaw ? (JSON.parse(bootRaw) as Partial<AndroidPersistedState>) : {};
+      const parsedLegacy = legacyRaw ? (JSON.parse(legacyRaw) as Partial<AndroidPersistedState>) : {};
+      return { ...defaults, ...parsedLegacy, ...parsedBoot };
     } catch {
       // ignore
     }
@@ -207,11 +382,769 @@ class AndroidWebEngine {
       cached[k] = files;
     }
     this.state.cachedFilesByFolder = cached;
+
+    // Write tiny bootstrap metadata to localStorage (~200 bytes — never hits 5 MB limit)
     try {
-      localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(this.state));
+      localStorage.setItem(
+        STATE_BOOTSTRAP_KEY,
+        JSON.stringify({
+          deviceId: this.state.deviceId,
+          apiId: this.state.apiId,
+          lastUserId: this.state.lastUserId,
+          hasAuthorizedSession: this.state.hasAuthorizedSession,
+          ultraLowRamNoticeShown: this.state.ultraLowRamNoticeShown,
+          dataSaverEnabled: this.state.dataSaverEnabled,
+        }),
+      );
     } catch {
-      // ignore quota errors
+      // ignore
     }
+
+    // Persist full unlimited state (folders, cachedFilesByFolder, split manifests, vault) to IndexedDB
+    if (this.saveDebounceTimer !== null) {
+      window.clearTimeout(this.saveDebounceTimer);
+    }
+    this.saveDebounceTimer = window.setTimeout(() => {
+      this.saveDebounceTimer = null;
+      void idbSetState(ANDROID_IDB_STATE_KEY, this.state).catch(() => {
+        // Fallback only if IndexedDB fails
+        try {
+          const slim = { ...this.state, cachedFilesByFolder: {} };
+          localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(slim));
+        } catch {
+          // ignore
+        }
+      });
+    }, 80);
+  }
+
+  private async checkEnvironmentForQuietNotices(
+    fileSize: number,
+    action: 'upload' | 'download' | 'stream',
+  ): Promise<void> {
+    if (!isAndroidNative()) return;
+    try {
+      const env = await TelegramDriveNative.getTransferEnvironment();
+      this.cachedUltraLowRam = Boolean(env.ultraLowRam);
+      this.cachedSystemDataSaver = Boolean(env.systemDataSaver);
+
+      // 1. Silent hardware RAM check: ONLY on <3.2 GiB RAM phones (1-3 GB RAM), ONCE EVER, non-blocking
+      if (
+        env.ultraLowRam &&
+        !this.state.ultraLowRamNoticeShown &&
+        fileSize >= 512 * 1024 * 1024
+      ) {
+        this.state.ultraLowRamNoticeShown = true;
+        this.saveState();
+        dispatchLocalEvent('quiet-hardware-notice', {
+          kind: 'ultra-low-ram',
+          deviceRamBytes: env.deviceRamBytes ?? 0,
+        });
+      }
+
+      // 2. Mobile Data notice: non-Wi-Fi metered connection on large files (>=100 MB), ONCE per session
+      if (
+        env.connected &&
+        !env.wifi_connected &&
+        env.metered &&
+        !this.mobileDataNoticeShownInSession &&
+        fileSize >= 100 * 1024 * 1024
+      ) {
+        this.mobileDataNoticeShownInSession = true;
+        dispatchLocalEvent('quiet-hardware-notice', {
+          kind: 'mobile-data',
+          action,
+          sizeBytes: fileSize,
+          dataSaverActive: Boolean(this.state.dataSaverEnabled || env.systemDataSaver),
+        });
+      }
+    } catch {
+      // Never block transfers on environment telemetry
+    }
+  }
+
+  private async isUltraLowRamDevice(): Promise<boolean> {
+    if (!isAndroidNative()) return false;
+    if (this.cachedUltraLowRam !== null) return this.cachedUltraLowRam;
+    try {
+      const env = await TelegramDriveNative.getTransferEnvironment();
+      this.cachedUltraLowRam = Boolean(env.ultraLowRam);
+      this.cachedSystemDataSaver = Boolean(env.systemDataSaver);
+      return this.cachedUltraLowRam;
+    } catch {
+      return false;
+    }
+  }
+
+  private isEffectiveDataSaver(): boolean {
+    return Boolean(this.state.dataSaverEnabled || this.cachedSystemDataSaver);
+  }
+
+  private async runWithTransientRetry<T>(
+    transferId: string,
+    signal: AbortSignal,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      if (signal.aborted || this.explicitlyCancelledTransfers.has(transferId)) {
+        throw new Error('ABORTED');
+      }
+      try {
+        return await fn();
+      } catch (err) {
+        if (
+          signal.aborted ||
+          this.explicitlyCancelledTransfers.has(transferId) ||
+          !isTransientAndroidError(err) ||
+          attempt >= 4
+        ) {
+          throw err;
+        }
+        attempt += 1;
+        const backoffMs = Math.min(20_000, 1500 * Math.pow(2, attempt - 1));
+        await waitOnlineOrDelay(backoffMs, signal);
+      }
+    }
+  }
+
+  private async ensureSplitManifestLoaded(
+    folderId: number | null,
+    messageId: number,
+    existingMsg?: Message,
+  ): Promise<SplitFileManifest | null> {
+    const key = fileCompositeKey(folderId, messageId);
+    const cached = this.state.splitManifests?.[key];
+    if (cached && cached.parts.length > 0) {
+      return cached;
+    }
+
+    const msg = existingMsg ?? (await this.fetchMessage(folderId, messageId));
+    const parsedHeader = parseSplitManifestFromMessage(msg);
+    if (!parsedHeader) return null;
+
+    if (parsedHeader.inlineManifest && parsedHeader.inlineManifest.parts.length === parsedHeader.header.count) {
+      if (!this.state.splitManifests) this.state.splitManifests = {};
+      this.state.splitManifests[key] = parsedHeader.inlineManifest;
+      this.saveState();
+      return parsedHeader.inlineManifest;
+    }
+
+    if (msg.media) {
+      const client = await this.ensureClient();
+      const bytes = await client.downloadAsBuffer(
+        msg.media as Parameters<TelegramClient['downloadAsBuffer']>[0],
+      );
+      const docParsed = parseSplitManifestJsonBytes(bytes);
+      if (docParsed && docParsed.parts.length > 0) {
+        if (!this.state.splitManifests) this.state.splitManifests = {};
+        this.state.splitManifests[key] = docParsed;
+        this.saveState();
+        return docParsed;
+      }
+    }
+    return parsedHeader.inlineManifest;
+  }
+
+  private async deleteSplitAwareMessage(folderId: number | null, messageId: number): Promise<void> {
+    const client = await this.ensureClient();
+    const peer = folderIdToPeer(folderId);
+    const key = fileCompositeKey(folderId, messageId);
+    let manifest: SplitFileManifest | null = this.state.splitManifests?.[key] ?? null;
+    if (!manifest) {
+      try {
+        manifest = await this.ensureSplitManifestLoaded(folderId, messageId);
+      } catch {
+        manifest = null;
+      }
+    }
+
+    const idsToDelete: number[] = [];
+    if (manifest && manifest.parts.length > 0) {
+      for (const p of manifest.parts) {
+        if (p.id > 0) idsToDelete.push(p.id);
+      }
+    }
+    idsToDelete.push(messageId);
+
+    for (let i = 0; i < idsToDelete.length; i += 100) {
+      const batch = idsToDelete.slice(i, i + 100);
+      await client.deleteMessagesById(peer, batch, { revoke: true });
+    }
+
+    if (this.state.splitManifests && key in this.state.splitManifests) {
+      delete this.state.splitManifests[key];
+      this.saveState();
+    }
+  }
+
+  private async streamAndroidByteRange(
+    folderId: number | null,
+    messageId: number,
+    startByte: number,
+    endByte: number,
+    onChunk: (chunk: Uint8Array) => Promise<boolean | void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const client = await this.ensureClient();
+    const manifest = await this.ensureSplitManifestLoaded(folderId, messageId);
+
+    if (manifest && manifest.parts.length > 0) {
+      const slices = resolveRangeAcrossParts(manifest.parts, startByte, endByte);
+      for (const slice of slices) {
+        if (signal?.aborted) break;
+        const partMsg = await this.fetchMessage(folderId, slice.messageId);
+        if (!partMsg.media) throw new Error('SPLIT_PART_MEDIA_MISSING');
+
+        const sliceLen = slice.partLocalEndInclusive - slice.partLocalStart + 1;
+        const alignedOffset = Math.floor(slice.partLocalStart / 4096) * 4096;
+        let skipBytes = slice.partLocalStart - alignedOffset;
+        let remaining = sliceLen;
+        const alignedLimit = Math.ceil((skipBytes + remaining) / 4096) * 4096;
+
+        for await (const rawChunk of client.downloadAsIterable(
+          partMsg.media as Parameters<TelegramClient['downloadAsIterable']>[0],
+          {
+            offset: alignedOffset,
+            limit: alignedLimit,
+            partSize: 512,
+            abortSignal: signal,
+          },
+        )) {
+          if (signal?.aborted) break;
+          let buf: Uint8Array = rawChunk;
+          if (skipBytes > 0) {
+            if (buf.byteLength <= skipBytes) {
+              skipBytes -= buf.byteLength;
+              continue;
+            }
+            buf = buf.subarray(skipBytes);
+            skipBytes = 0;
+          }
+          if (buf.byteLength > remaining) {
+            buf = buf.subarray(0, remaining);
+          }
+          if (buf.byteLength > 0) {
+            remaining -= buf.byteLength;
+            this.state.bandwidth.downloaded += buf.byteLength;
+            const keepGoing = await onChunk(buf);
+            if (keepGoing === false) return;
+          }
+          if (remaining <= 0) break;
+        }
+      }
+      return;
+    }
+
+    const msg = await this.fetchMessage(folderId, messageId);
+    if (!msg.media) throw new Error('MEDIA_NOT_FOUND');
+    const alignedOffset = Math.floor(startByte / 4096) * 4096;
+    let skipBytes = startByte - alignedOffset;
+    let remaining = endByte - startByte + 1;
+    const alignedLimit = Math.ceil((skipBytes + remaining) / 4096) * 4096;
+
+    for await (const rawChunk of client.downloadAsIterable(
+      msg.media as Parameters<TelegramClient['downloadAsIterable']>[0],
+      {
+        offset: alignedOffset,
+        limit: alignedLimit,
+        partSize: 512,
+        abortSignal: signal,
+      },
+    )) {
+      if (signal?.aborted) break;
+      let buf: Uint8Array = rawChunk;
+      if (skipBytes > 0) {
+        if (buf.byteLength <= skipBytes) {
+          skipBytes -= buf.byteLength;
+          continue;
+        }
+        buf = buf.subarray(skipBytes);
+        skipBytes = 0;
+      }
+      if (buf.byteLength > remaining) {
+        buf = buf.subarray(0, remaining);
+      }
+      if (buf.byteLength > 0) {
+        remaining -= buf.byteLength;
+        this.state.bandwidth.downloaded += buf.byteLength;
+        const keepGoing = await onChunk(buf);
+        if (keepGoing === false) return;
+      }
+      if (remaining <= 0) break;
+    }
+  }
+
+  private async ensureAndroidMediaServer(): Promise<{ port: number; token: string; baseUrl: string }> {
+    if (!this.mediaServerPromise) {
+      this.mediaServerPromise = (async () => {
+        await TelegramDriveNative.addListener('mediaStreamRequest', (ev: MediaStreamRequestEvent) => {
+          void this.handleAndroidMediaStreamRequest(ev);
+        });
+        await TelegramDriveNative.addListener('mediaStreamAbort', ({ reqId }) => {
+          this.activeMediaStreamAborts.get(reqId)?.abort();
+          this.activeMediaStreamAborts.delete(reqId);
+        });
+        return await TelegramDriveNative.startLocalMediaServer();
+      })();
+    }
+    return this.mediaServerPromise;
+  }
+
+  private async handleAndroidMediaStreamRequest(ev: MediaStreamRequestEvent): Promise<void> {
+    const abort = new AbortController();
+    this.activeMediaStreamAborts.set(ev.reqId, abort);
+    try {
+      const folderId =
+        ev.folder === 'home' || ev.folder === 'saved' || ev.folder === '0'
+          ? null
+          : Number.parseInt(ev.folder, 10);
+      const messageId = Number(ev.messageId);
+      const manifest = await this.ensureSplitManifestLoaded(folderId, messageId);
+      let totalSize = 0;
+      let mimeType = 'application/octet-stream';
+
+      if (manifest) {
+        totalSize = manifest.totalSize;
+        mimeType = manifest.mime || guessMimeType(manifest.name);
+      } else {
+        const msg = await this.fetchMessage(folderId, messageId);
+        const key = fileCompositeKey(folderId, messageId);
+        const mapped = mapMessageToTelegramFile(msg, folderId, {
+          customName: this.state.fileRenames[key],
+          encryptedRecord: this.vault.getEncryptedFileRecord(key),
+          vaultUnlocked: this.vault.getStatus().is_unlocked,
+        });
+        totalSize = mapped?.size || ((msg.media as unknown as { fileSize?: number })?.fileSize ?? 0);
+        mimeType = mapped?.mime_type || guessMimeType(mapped?.name ?? '');
+      }
+
+      if (totalSize > 0) {
+        void this.checkEnvironmentForQuietNotices(totalSize, 'stream');
+      }
+
+      if (totalSize <= 0) {
+        await TelegramDriveNative.respondMediaStreamHeader({
+          reqId: ev.reqId,
+          status: 404,
+          mimeType,
+          totalSize: 0,
+          start: 0,
+          end: 0,
+          acceptRanges: true,
+        });
+        return;
+      }
+
+      const rangeText = (ev.range || '').trim();
+      let status = 200;
+      let start = 0;
+      let end = totalSize - 1;
+
+      if (rangeText.startsWith('bytes=')) {
+        status = 206;
+        const spec = rangeText.slice(6).split(',')[0].trim();
+        const [startStr, endStr] = spec.split('-');
+        if (startStr === '' && endStr) {
+          const suffixLen = Number.parseInt(endStr, 10);
+          start = Math.max(0, totalSize - (Number.isFinite(suffixLen) ? suffixLen : 65536));
+          end = totalSize - 1;
+        } else {
+          start = Number.parseInt(startStr, 10) || 0;
+          if (endStr && endStr.trim() !== '') {
+            end = Math.min(totalSize - 1, Number.parseInt(endStr, 10));
+          } else {
+            // Cap open-ended Range window to keep Mobile Data & RAM lean (players auto-request next range)
+            const windowBytes = this.isEffectiveDataSaver()
+              ? 2 * 1024 * 1024
+              : 16 * 1024 * 1024;
+            end = Math.min(totalSize - 1, start + windowBytes - 1);
+          }
+        }
+      }
+
+      if (start < 0 || start >= totalSize || end < start) {
+        await TelegramDriveNative.respondMediaStreamHeader({
+          reqId: ev.reqId,
+          status: 416,
+          mimeType,
+          totalSize,
+          start: 0,
+          end: 0,
+          acceptRanges: true,
+        });
+        return;
+      }
+
+      await TelegramDriveNative.respondMediaStreamHeader({
+        reqId: ev.reqId,
+        status,
+        mimeType,
+        totalSize,
+        start,
+        end,
+        acceptRanges: true,
+      });
+
+      if (ev.method === 'HEAD') {
+        await TelegramDriveNative.endMediaStream({ reqId: ev.reqId });
+        return;
+      }
+
+      await this.streamAndroidByteRange(
+        folderId,
+        messageId,
+        start,
+        end,
+        async chunk => {
+          if (abort.signal.aborted) return false;
+          const res = await TelegramDriveNative.pushMediaStreamChunk({
+            reqId: ev.reqId,
+            data: uint8ToBase64(chunk),
+          });
+          if (res.closed) {
+            abort.abort();
+            return false;
+          }
+          return true;
+        },
+        abort.signal,
+      );
+
+      await TelegramDriveNative.endMediaStream({ reqId: ev.reqId });
+    } catch (err) {
+      await TelegramDriveNative.endMediaStream({
+        reqId: ev.reqId,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(() => undefined);
+    } finally {
+      this.activeMediaStreamAborts.delete(ev.reqId);
+    }
+  }
+
+  private createNativeChunkReadableStream(
+    nativePath: string,
+    sliceOffset: number,
+    sliceLength: number,
+    signal: AbortSignal,
+  ): ReadableStream<Uint8Array> {
+    let cursor = 0;
+    const chunkSize = 1024 * 1024; // 1 MiB low-RAM native bridge slices
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (signal.aborted) {
+          controller.error(new Error('ABORTED'));
+          return;
+        }
+        const remaining = sliceLength - cursor;
+        if (remaining <= 0) {
+          controller.close();
+          return;
+        }
+        const toRead = Math.min(chunkSize, remaining);
+        const res = await TelegramDriveNative.readFileChunkBase64({
+          path: nativePath,
+          offset: sliceOffset + cursor,
+          length: toRead,
+        });
+        if (!res.bytesRead || !res.data) {
+          controller.close();
+          return;
+        }
+        const bytes = base64ToUint8(res.data);
+        cursor += bytes.byteLength;
+        controller.enqueue(bytes);
+        if (cursor >= sliceLength) {
+          controller.close();
+        }
+      },
+    });
+  }
+
+  private async readSliceIntoUint8(
+    browserFile: File | undefined,
+    nativePath: string,
+    sliceOffset: number,
+    sliceLength: number,
+    signal: AbortSignal,
+  ): Promise<Uint8Array> {
+    if (browserFile) {
+      const buf = await browserFile.slice(sliceOffset, sliceOffset + sliceLength).arrayBuffer();
+      return new Uint8Array(buf);
+    }
+    const out = new Uint8Array(sliceLength);
+    let cursor = 0;
+    const step = 1024 * 1024;
+    while (cursor < sliceLength) {
+      if (signal.aborted) throw new Error('ABORTED');
+      const toRead = Math.min(step, sliceLength - cursor);
+      const res = await TelegramDriveNative.readFileChunkBase64({
+        path: nativePath,
+        offset: sliceOffset + cursor,
+        length: toRead,
+      });
+      if (!res.bytesRead || !res.data) break;
+      const chunk = base64ToUint8(res.data);
+      out.set(chunk.subarray(0, Math.min(chunk.byteLength, sliceLength - cursor)), cursor);
+      cursor += chunk.byteLength;
+    }
+    return cursor === sliceLength ? out : out.subarray(0, cursor);
+  }
+
+  private async performAndroidSplitUpload(params: {
+    transferId: string;
+    rawPath: string;
+    browserFile?: File;
+    folderId: number | null;
+    originalName: string;
+    originalSize: number;
+    lastModifiedMs: number;
+    isEncrypted: boolean;
+    protectionMode?: string;
+    promptToken?: number;
+    protectMetadata: boolean;
+    abort: AbortController;
+  }): Promise<number> {
+    const {
+      transferId,
+      rawPath,
+      browserFile,
+      folderId,
+      originalName,
+      originalSize,
+      lastModifiedMs,
+      isEncrypted,
+      protectionMode,
+      promptToken,
+      protectMetadata,
+      abort,
+    } = params;
+
+    const client = await this.ensureClient();
+    const peer = folderIdToPeer(folderId);
+    const originalMime = guessMimeType(originalName);
+    const ultraLowRam = isEncrypted ? await this.isUltraLowRamDevice() : false;
+    const partSizeLimit = isEncrypted
+      ? ultraLowRam
+        ? ANDROID_ENCRYPTED_SPLIT_PART_LOW_RAM
+        : ANDROID_ENCRYPTED_SPLIT_PART_NORMAL
+      : SPLIT_PART_SIZE_BYTES;
+
+    const partPlans = computeSplitPartPlan(originalSize, partSizeLimit);
+    const partCount = partPlans.length;
+
+    const resolvedPassphrase =
+      isEncrypted && protectionMode === 'passphrase' && promptToken !== undefined
+        ? this.vault.consumeStagedPassphrase(promptToken)
+        : undefined;
+    if (isEncrypted && protectionMode === 'passphrase' && !resolvedPassphrase) {
+      throw new Error('PASSPHRASE_PROMPT_REQUIRED');
+    }
+
+    const checkpointKey = `${folderId ?? 'saved'}:${rawPath}:${originalSize}:${lastModifiedMs}:${isEncrypted ? (protectionMode ?? 'vault') : 'plain'}`;
+    if (!this.state.splitUploadCheckpoints) this.state.splitUploadCheckpoints = {};
+
+    let checkpoint = this.state.splitUploadCheckpoints[checkpointKey];
+    if (checkpoint && checkpoint.partSize === partSizeLimit && checkpoint.totalSize === originalSize) {
+      const doneIds = Object.values(checkpoint.completedParts).map(p => p.messageId);
+      if (doneIds.length > 0) {
+        try {
+          const msgs = await client.getMessages(peer, doneIds.slice(0, 100));
+          const existingSet = new Set(msgs.filter((m): m is Message => Boolean(m)).map(m => m.id));
+          for (const [idxStr, meta] of Object.entries(checkpoint.completedParts)) {
+            if (!existingSet.has(meta.messageId)) {
+              delete checkpoint.completedParts[Number(idxStr)];
+            }
+          }
+        } catch {
+          // Keep existing checkpoint on transient error
+        }
+      }
+    } else {
+      checkpoint = {
+        fingerprint: checkpointKey,
+        groupId: crypto.randomUUID().replace(/-/g, '').slice(0, 16),
+        fileName: originalName,
+        folderId,
+        totalSize: originalSize,
+        partSize: partSizeLimit,
+        completedParts: {},
+        updatedAt: Date.now(),
+      };
+      this.state.splitUploadCheckpoints[checkpointKey] = checkpoint;
+      this.saveState();
+    }
+
+    const groupId = checkpoint.groupId;
+    dispatchLocalEvent('split-file-notice', {
+      id: transferId,
+      fileName: originalName,
+      totalBytes: originalSize,
+      partCount,
+    });
+
+    const t0 = Date.now();
+    let vaultId: string | undefined;
+
+    for (const plan of partPlans) {
+      if (abort.signal.aborted) throw new Error('ABORTED');
+      if (checkpoint.completedParts[plan.index]) continue;
+
+      const completedPlainBefore = partPlans
+        .slice(0, plan.index)
+        .reduce((acc, p) => acc + p.size, 0);
+
+      await this.runWithTransientRetry(transferId, abort.signal, async () => {
+        const partName = buildSplitPartFileName(groupId, plan.index, partCount);
+        let uploadedPartSize = plan.size;
+
+        let uploadInput: Blob | Uint8Array | ReadableStream<Uint8Array>;
+        if (!isEncrypted) {
+          uploadInput = browserFile
+            ? browserFile.slice(plan.offset, plan.offset + plan.size)
+            : this.createNativeChunkReadableStream(
+                rawPath,
+                plan.offset,
+                plan.size,
+                abort.signal,
+              );
+        } else {
+          const plainSlice = await this.readSliceIntoUint8(
+            browserFile,
+            rawPath,
+            plan.offset,
+            plan.size,
+            abort.signal,
+          );
+          const enc = this.vault.encryptBuffer(plainSlice, {
+            mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+            passphrase: resolvedPassphrase,
+            originalName: `${originalName}.part${plan.index + 1}`,
+            originalMime: 'application/octet-stream',
+            protectMetadata: true,
+          });
+          vaultId = enc.vaultId;
+          uploadedPartSize = enc.ciphertext.byteLength;
+          uploadInput = enc.ciphertext;
+        }
+
+        const uploaded = await client.uploadFile({
+          file: uploadInput as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
+          fileName: partName,
+          fileSize: uploadedPartSize,
+          fileMime: 'application/octet-stream',
+          partSize: 512,
+          abortSignal: abort.signal,
+          progressCallback: (done, tot) => {
+            const frac = tot > 0 ? Math.min(1, done / tot) : 0;
+            const overallDone = Math.min(
+              originalSize,
+              completedPlainBefore + Math.round(frac * plan.size),
+            );
+            const speed = Math.round(overallDone / Math.max(0.1, (Date.now() - t0) / 1000));
+            dispatchLocalEvent('upload-progress', {
+              id: transferId,
+              progress: Math.min(99, Math.round((overallDone / originalSize) * 100)),
+              uploaded_bytes: overallDone,
+              total_bytes: originalSize,
+              speed_bytes_per_sec: speed,
+              part_index: plan.index + 1,
+              part_count: partCount,
+            });
+          },
+        });
+
+        const partCaption = buildSplitPartCaption(groupId, plan.index, partCount, uploadedPartSize);
+        const sentPart = await client.sendMedia(peer, {
+          type: 'document',
+          file: uploaded,
+          fileName: partName,
+          caption: partCaption,
+        });
+
+        this.state.bandwidth.uploaded += uploadedPartSize;
+        checkpoint.completedParts[plan.index] = {
+          messageId: sentPart.id,
+          size: uploadedPartSize,
+        };
+        checkpoint.updatedAt = Date.now();
+        this.saveState();
+      });
+    }
+
+    const orderedParts: SplitPartDescriptor[] = partPlans.map(p => {
+      const saved = checkpoint.completedParts[p.index];
+      if (!saved) throw new Error(`SPLIT_PART_MISSING_${p.index}`);
+      return { id: saved.messageId, size: saved.size };
+    });
+
+    const manifestPayload: SplitFileManifest = {
+      v: 1,
+      groupId,
+      name: originalName,
+      mime: originalMime,
+      totalSize: originalSize,
+      partSize: partSizeLimit,
+      parts: orderedParts,
+      createdAt: new Date().toISOString(),
+      ...(isEncrypted
+        ? {
+            encrypted: {
+              mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+              vaultId,
+              protectMetadata,
+            },
+          }
+        : {}),
+    };
+
+    const manifestBytes = new TextEncoder().encode(JSON.stringify(manifestPayload));
+    const manifestName = buildSplitManifestFileName(groupId);
+    const manifestCaption = buildSplitManifestCaption(manifestPayload);
+
+    const sentManifest = await this.runWithTransientRetry(transferId, abort.signal, async () => {
+      const uploadedManifest = await client.uploadFile({
+        file: manifestBytes,
+        fileName: manifestName,
+        fileSize: manifestBytes.byteLength,
+        fileMime: 'application/json',
+        abortSignal: abort.signal,
+      });
+      return await client.sendMedia(peer, {
+        type: 'document',
+        file: uploadedManifest,
+        fileName: manifestName,
+        caption: manifestCaption,
+      });
+    });
+
+    const finalKey = fileCompositeKey(folderId, sentManifest.id);
+    if (!this.state.splitManifests) this.state.splitManifests = {};
+    this.state.splitManifests[finalKey] = manifestPayload;
+    delete this.state.splitUploadCheckpoints[checkpointKey];
+
+    if (isEncrypted) {
+      this.vault.registerEncryptedFile({
+        key: finalKey,
+        mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+        vaultId,
+        originalName,
+        originalSize,
+        protectMetadata,
+      });
+    }
+    this.saveState();
+
+    dispatchLocalEvent('upload-progress', {
+      id: transferId,
+      progress: 100,
+      uploaded_bytes: originalSize,
+      total_bytes: originalSize,
+      speed_bytes_per_sec: 0,
+      part_index: partCount,
+      part_count: partCount,
+    });
+    return sentManifest.id;
   }
 
   private async storeSecret(key: string, value: string): Promise<void> {
@@ -363,13 +1296,44 @@ class AndroidWebEngine {
     const out: MappedTelegramFile[] = [];
     const vaultUnlocked = this.vault.getStatus().is_unlocked;
     let offset: { id: number; date: number } | undefined;
+    let splitCacheDirty = false;
 
     for (let page = 0; page < 4; page++) {
       const history = await client.getHistory(peer, { limit: 100, offset });
       if (history.length === 0) break;
       const pageFiles: MappedTelegramFile[] = [];
       for (const msg of history) {
+        if (isSplitPartMessage(msg)) continue;
+
         const key = fileCompositeKey(folderId, msg.id);
+        const parsedSplit = parseSplitManifestFromMessage(msg);
+        if (parsedSplit) {
+          let manifest = this.state.splitManifests?.[key] ?? parsedSplit.inlineManifest;
+          if (!manifest) {
+            manifest = await this.ensureSplitManifestLoaded(folderId, msg.id, msg);
+          } else if (!this.state.splitManifests?.[key]) {
+            if (!this.state.splitManifests) this.state.splitManifests = {};
+            this.state.splitManifests[key] = manifest;
+            splitCacheDirty = true;
+          }
+
+          const mappedSplit = mapSplitManifestToTelegramFile(
+            msg,
+            folderId,
+            parsedSplit.header,
+            manifest ?? undefined,
+            {
+              customName: this.state.fileRenames[key],
+              favorite: this.state.favorites.includes(key),
+              encryptedRecord: this.vault.getEncryptedFileRecord(key),
+              vaultUnlocked,
+            },
+          );
+          out.push(mappedSplit);
+          pageFiles.push(mappedSplit);
+          continue;
+        }
+
         const mapped = mapMessageToTelegramFile(msg, folderId, {
           customName: this.state.fileRenames[key],
           favorite: this.state.favorites.includes(key),
@@ -389,7 +1353,9 @@ class AndroidWebEngine {
     }
 
     this.filesCache.set(String(folderId ?? 'saved'), out);
-    this.saveState();
+    if (splitCacheDirty || out.length >= 0) {
+      this.saveState();
+    }
     return out;
   }
 
@@ -416,9 +1382,40 @@ class AndroidWebEngine {
   }
 
   public async invoke(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    await this.stateHydratedPromise;
     switch (cmd) {
       case 'cmd_get_startup_health':
         return { ok: true, streaming_port: 14201 };
+
+      case 'cmd_set_data_saver_mode': {
+        this.state.dataSaverEnabled = Boolean(args.enabled);
+        this.saveState();
+        return { enabled: this.state.dataSaverEnabled };
+      }
+
+      case 'cmd_get_android_capabilities': {
+        if (isAndroidNative()) {
+          const env = await TelegramDriveNative.getTransferEnvironment().catch(() => null);
+          if (env) {
+            this.cachedUltraLowRam = Boolean(env.ultraLowRam);
+            this.cachedSystemDataSaver = Boolean(env.systemDataSaver);
+          }
+          return {
+            ultraLowRam: Boolean(env?.ultraLowRam),
+            deviceRamBytes: env?.deviceRamBytes ?? 0,
+            systemDataSaver: Boolean(env?.systemDataSaver),
+            effectiveDataSaver: Boolean(this.state.dataSaverEnabled || env?.systemDataSaver),
+            metered: Boolean(env?.metered && !env?.wifi_connected),
+          };
+        }
+        return {
+          ultraLowRam: false,
+          deviceRamBytes: 0,
+          systemDataSaver: false,
+          effectiveDataSaver: Boolean(this.state.dataSaverEnabled),
+          metered: false,
+        };
+      }
 
       case 'cmd_check_network_reachable':
       case 'cmd_check_android_network':
@@ -672,8 +1669,11 @@ class AndroidWebEngine {
         this.currentUserId = null;
         this.state.lastUserId = null;
         this.state.cachedFilesByFolder = {};
+        this.state.splitManifests = {};
+        this.state.splitUploadCheckpoints = {};
         this.filesCache.clear();
         this.state.hasAuthorizedSession = false;
+        await idbClearState().catch(() => undefined);
         this.saveState();
         this.vault.lock();
         return { signed_out: true, remote_session_revoked: revoked };
@@ -943,8 +1943,7 @@ class AndroidWebEngine {
         const folderId =
           args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
         const messageId = Number(args.messageId);
-        const client = await this.ensureClient();
-        await client.deleteMessagesById(folderIdToPeer(folderId), [messageId], { revoke: true });
+        await this.deleteSplitAwareMessage(folderId, messageId);
         return null;
       }
 
@@ -969,13 +1968,78 @@ class AndroidWebEngine {
             : Number(args.targetFolderId);
         const ids = (args.messageIds as number[]) ?? [];
         const client = await this.ensureClient();
-        await client.forwardMessagesById({
-          fromChatId: folderIdToPeer(src),
-          toChatId: folderIdToPeer(dst),
-          messages: ids,
-          noAuthor: true,
-        });
-        await client.deleteMessagesById(folderIdToPeer(src), ids, { revoke: true });
+        const plainIds: number[] = [];
+
+        for (const msgId of ids) {
+          const srcKey = fileCompositeKey(src, msgId);
+          let manifest = this.state.splitManifests?.[srcKey] ?? null;
+          if (!manifest) {
+            manifest = await this.ensureSplitManifestLoaded(src, msgId).catch(() => null);
+          }
+
+          if (manifest && manifest.parts.length > 0) {
+            const newParts: SplitPartDescriptor[] = [];
+            for (let i = 0; i < manifest.parts.length; i += 100) {
+              const slice = manifest.parts.slice(i, i + 100);
+              const forwarded = await client.forwardMessagesById({
+                fromChatId: folderIdToPeer(src),
+                toChatId: folderIdToPeer(dst),
+                messages: slice.map(p => p.id),
+                noAuthor: true,
+              });
+              for (let j = 0; j < slice.length; j++) {
+                newParts.push({
+                  id: forwarded[j]?.id ?? slice[j].id,
+                  size: slice[j].size,
+                });
+              }
+            }
+            const nextManifest: SplitFileManifest = {
+              ...manifest,
+              parts: newParts,
+            };
+            const manifestBytes = new TextEncoder().encode(JSON.stringify(nextManifest));
+            const manifestName = buildSplitManifestFileName(nextManifest.groupId);
+            const uploadedManifest = await client.uploadFile({
+              file: manifestBytes,
+              fileName: manifestName,
+              fileSize: manifestBytes.byteLength,
+              fileMime: 'application/json',
+            });
+            const sentManifest = await client.sendMedia(folderIdToPeer(dst), {
+              type: 'document',
+              file: uploadedManifest,
+              fileName: manifestName,
+              caption: buildSplitManifestCaption(nextManifest),
+            });
+
+            const dstKey = fileCompositeKey(dst, sentManifest.id);
+            if (!this.state.splitManifests) this.state.splitManifests = {};
+            this.state.splitManifests[dstKey] = nextManifest;
+            if (this.state.fileRenames[srcKey]) {
+              this.state.fileRenames[dstKey] = this.state.fileRenames[srcKey];
+              delete this.state.fileRenames[srcKey];
+            }
+            const encRec = this.vault.getEncryptedFileRecord(srcKey);
+            if (encRec) {
+              this.vault.registerEncryptedFile({ ...encRec, key: dstKey });
+            }
+            await this.deleteSplitAwareMessage(src, msgId);
+            this.saveState();
+          } else {
+            plainIds.push(msgId);
+          }
+        }
+
+        if (plainIds.length > 0) {
+          await client.forwardMessagesById({
+            fromChatId: folderIdToPeer(src),
+            toChatId: folderIdToPeer(dst),
+            messages: plainIds,
+            noAuthor: true,
+          });
+          await client.deleteMessagesById(folderIdToPeer(src), plainIds, { revoke: true });
+        }
         return null;
       }
 
@@ -985,6 +2049,7 @@ class AndroidWebEngine {
         const messageId = Number(args.messageId);
         const cacheKey = `thumb:${folderId ?? 'saved'}:${messageId}`;
         if (this.blobUrlCache.has(cacheKey)) return this.blobUrlCache.get(cacheKey)!;
+        if (this.isEffectiveDataSaver() && !args.force) return null;
 
         try {
           const msg = await this.fetchMessage(folderId, messageId);
@@ -1018,6 +2083,18 @@ class AndroidWebEngine {
         const cacheKey = `prev:${folderId ?? 'saved'}:${messageId}`;
         if (this.blobUrlCache.has(cacheKey)) return this.blobUrlCache.get(cacheKey)!;
 
+        // For split or large media (>120 MiB) on Android native, stream directly via local HTTP Range server
+        const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+        if (splitManifest) {
+          if (!splitManifest.encrypted && isAndroidNative()) {
+            void this.checkEnvironmentForQuietNotices(splitManifest.totalSize, 'stream');
+            const srv = await this.ensureAndroidMediaServer();
+            const fSeg = folderId === null ? 'saved' : String(folderId);
+            return `${srv.baseUrl}/stream/${fSeg}/${messageId}?token=${srv.token}`;
+          }
+          throw new Error('PREVIEW_TOO_LARGE_USE_STREAM_OR_DOWNLOAD');
+        }
+
         const msg = await this.fetchMessage(folderId, messageId);
         const key = fileCompositeKey(folderId, messageId);
         const mapped = mapMessageToTelegramFile(msg, folderId, {
@@ -1025,6 +2102,25 @@ class AndroidWebEngine {
           encryptedRecord: this.vault.getEncryptedFileRecord(key),
           vaultUnlocked: this.vault.getStatus().is_unlocked,
         });
+        const mediaSize = mapped?.size || ((msg.media as unknown as { fileSize?: number })?.fileSize ?? 0);
+        const mime = mapped?.mime_type || guessMimeType(mapped?.name ?? '');
+        const isMappedEncrypted = Boolean(
+          mapped?.encryption || (mapped?.encryption_state && mapped.encryption_state !== 'plain'),
+        );
+
+        if (
+          isAndroidNative() &&
+          !isMappedEncrypted &&
+          mediaSize > 48 * 1024 * 1024 &&
+          (mime.startsWith('video/') || mime.startsWith('audio/'))
+        ) {
+          void this.checkEnvironmentForQuietNotices(mediaSize, 'stream');
+          const srv = await this.ensureAndroidMediaServer();
+          const fSeg = folderId === null ? 'saved' : String(folderId);
+          return `${srv.baseUrl}/stream/${fSeg}/${messageId}?token=${srv.token}`;
+        }
+
+        void this.checkEnvironmentForQuietNotices(mediaSize, 'stream');
         const rawBytes = await this.downloadRawBytes(folderId, messageId, (done, total) => {
           dispatchLocalEvent('preview-progress', {
             folder_id: folderId,
@@ -1039,7 +2135,6 @@ class AndroidWebEngine {
               promptToken: typeof args.promptToken === 'number' ? args.promptToken : undefined,
             }).plaintext
           : rawBytes;
-        const mime = mapped?.mime_type || guessMimeType(mapped?.name ?? '');
         const url = URL.createObjectURL(new Blob([plain as unknown as BlobPart], { type: mime }));
         this.blobUrlCache.set(cacheKey, url);
         return url;
@@ -1125,84 +2220,132 @@ class AndroidWebEngine {
         const folderId =
           req.folder_id === null || req.folder_id === undefined ? null : Number(req.folder_id);
         const transferId = String(req.id ?? args.id ?? `up_${Date.now()}`);
+        this.explicitlyCancelledTransfers.delete(transferId);
         const abort = new AbortController();
         this.activeAborts.set(transferId, abort);
 
         try {
           const protectionMode = (req.protection_mode ?? args.protectionMode) as string | undefined;
           const isEncrypted = protectionMode === 'vault' || protectionMode === 'passphrase';
-          let originalName = rawPath.split(/[\\/]/).pop() || 'upload.bin';
-          let originalSize = 0;
-          let uploadSource: File | Uint8Array;
-          let uploadByteLength = 0;
-          let uploadName = originalName;
-          let vaultId: string | undefined;
+          const promptToken = (req.prompt_token ?? args.promptToken) as number | undefined;
+          const protectMetadata = Boolean(req.protect_metadata ?? args.protectMetadata);
 
           const browserFile = this.pendingFilesByPath.get(rawPath);
-          if (browserFile && !isEncrypted) {
-            originalName = browserFile.name;
-            originalSize = browserFile.size;
-            uploadName = originalName;
-            uploadSource = browserFile;
-            uploadByteLength = browserFile.size;
-          } else {
-            let fileBytes: Uint8Array;
-            if (browserFile) {
-              originalName = browserFile.name;
-              fileBytes = new Uint8Array(await browserFile.arrayBuffer());
-            } else if (isAndroidNative()) {
-              const readRes = await TelegramDriveNative.readFileBase64({ path: rawPath });
-              originalName = readRes.name || originalName;
-              fileBytes = base64ToUint8(readRes.data);
-            } else {
-              throw new Error('FILE_UNREADABLE');
-            }
-            originalSize = fileBytes.byteLength;
-            uploadSource = fileBytes;
-            uploadByteLength = fileBytes.byteLength;
-            uploadName = originalName;
+          let originalName = rawPath.split(/[\\/]/).pop() || 'upload.bin';
+          let originalSize = Number(req.file_size ?? args.fileSize ?? 0);
+          let lastModifiedMs = 0;
 
-            if (isEncrypted) {
-              const enc = this.vault.encryptBuffer(fileBytes, {
-                mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
-                promptToken: (req.prompt_token ?? args.promptToken) as number | undefined,
-                originalName,
-                originalMime: guessMimeType(originalName),
-                protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
-              });
-              uploadSource = enc.ciphertext;
-              uploadByteLength = enc.ciphertext.byteLength;
-              uploadName = enc.uploadFileName;
-              vaultId = enc.vaultId;
-            }
+          if (browserFile) {
+            originalName = browserFile.name || originalName;
+            originalSize = browserFile.size;
+            lastModifiedMs = browserFile.lastModified || 0;
+          } else if (isAndroidNative()) {
+            const info = await TelegramDriveNative.getFileInfo({ path: rawPath });
+            if (info.name) originalName = info.name;
+            if (info.size > 0) originalSize = info.size;
+          } else {
+            throw new Error('FILE_UNREADABLE');
+          }
+
+          if (typeof req.file_name === 'string' && req.file_name.trim()) {
+            originalName = req.file_name.trim();
+          }
+
+          void this.checkEnvironmentForQuietNotices(originalSize, 'upload');
+
+          const ultraLowRam = isEncrypted ? await this.isUltraLowRamDevice() : false;
+          const encryptedSplitThreshold = ultraLowRam
+            ? ANDROID_ENCRYPTED_SPLIT_PART_LOW_RAM
+            : ANDROID_ENCRYPTED_SPLIT_PART_NORMAL;
+
+          if (
+            shouldSplitUpload(originalSize, isEncrypted) ||
+            (isEncrypted && originalSize > encryptedSplitThreshold)
+          ) {
+            return await this.performAndroidSplitUpload({
+              transferId,
+              rawPath,
+              browserFile,
+              folderId,
+              originalName,
+              originalSize,
+              lastModifiedMs,
+              isEncrypted,
+              protectionMode,
+              promptToken,
+              protectMetadata,
+              abort,
+            });
+          }
+
+          let uploadName = originalName;
+          let uploadByteLength = originalSize;
+          let vaultId: string | undefined;
+          const resolvedPassphrase =
+            isEncrypted && protectionMode === 'passphrase' && promptToken !== undefined
+              ? this.vault.consumeStagedPassphrase(promptToken)
+              : undefined;
+          if (isEncrypted && protectionMode === 'passphrase' && !resolvedPassphrase) {
+            throw new Error('PASSPHRASE_PROMPT_REQUIRED');
+          }
+
+          let encryptedPayload: Uint8Array | null = null;
+          if (isEncrypted) {
+            const fileBytes = await this.readSliceIntoUint8(
+              browserFile,
+              rawPath,
+              0,
+              originalSize,
+              abort.signal,
+            );
+            const enc = this.vault.encryptBuffer(fileBytes, {
+              mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+              passphrase: resolvedPassphrase,
+              originalName,
+              originalMime: guessMimeType(originalName),
+              protectMetadata,
+            });
+            encryptedPayload = enc.ciphertext;
+            uploadByteLength = enc.ciphertext.byteLength;
+            uploadName = enc.uploadFileName;
+            vaultId = enc.vaultId;
           }
 
           const client = await this.ensureClient();
           const t0 = Date.now();
-          const uploaded = await client.uploadFile({
-            file: uploadSource,
-            fileName: uploadName,
-            fileSize: uploadByteLength,
-            fileMime: isEncrypted ? 'application/octet-stream' : guessMimeType(originalName),
-            abortSignal: abort.signal,
-            progressCallback: (done, tot) => {
-              const speed = Math.round(done / Math.max(0.1, (Date.now() - t0) / 1000));
-              dispatchLocalEvent('upload-progress', {
-                id: transferId,
-                progress: tot > 0 ? Math.min(99, Math.round((done / tot) * 100)) : 0,
-                uploaded_bytes: done,
-                total_bytes: tot || uploadByteLength,
-                speed_bytes_per_sec: speed,
-              });
-            },
+          const sent = await this.runWithTransientRetry(transferId, abort.signal, async () => {
+            const uploadSource: File | Uint8Array | ReadableStream<Uint8Array> = encryptedPayload
+              ? encryptedPayload
+              : browserFile
+                ? browserFile
+                : this.createNativeChunkReadableStream(rawPath, 0, originalSize, abort.signal);
+
+            const uploaded = await client.uploadFile({
+              file: uploadSource as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
+              fileName: uploadName,
+              fileSize: uploadByteLength,
+              fileMime: isEncrypted ? 'application/octet-stream' : guessMimeType(originalName),
+              abortSignal: abort.signal,
+              progressCallback: (done, tot) => {
+                const speed = Math.round(done / Math.max(0.1, (Date.now() - t0) / 1000));
+                dispatchLocalEvent('upload-progress', {
+                  id: transferId,
+                  progress: tot > 0 ? Math.min(99, Math.round((done / tot) * 100)) : 0,
+                  uploaded_bytes: done,
+                  total_bytes: tot || uploadByteLength,
+                  speed_bytes_per_sec: speed,
+                });
+              },
+            });
+
+            return await client.sendMedia(folderIdToPeer(folderId), {
+              type: 'document',
+              file: uploaded,
+              fileName: uploadName,
+              caption: isEncrypted ? '' : originalName,
+            });
           });
 
-          const sent = await client.sendMedia(folderIdToPeer(folderId), {
-            type: 'document',
-            file: uploaded,
-            fileName: uploadName,
-            caption: isEncrypted ? '' : originalName,
-          });
           this.state.bandwidth.uploaded += uploadByteLength;
 
           if (isEncrypted) {
@@ -1212,7 +2355,7 @@ class AndroidWebEngine {
               vaultId,
               originalName,
               originalSize,
-              protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
+              protectMetadata,
             });
           }
           this.saveState();
@@ -1226,6 +2369,7 @@ class AndroidWebEngine {
           return sent.id;
         } finally {
           this.activeAborts.delete(transferId);
+          this.explicitlyCancelledTransfers.delete(transferId);
         }
       }
 
@@ -1237,32 +2381,265 @@ class AndroidWebEngine {
         const transferId = String(req.id ?? args.id ?? `dl_${messageId}`);
         const savePath = String(req.save_path ?? args.savePath ?? `telegram_${messageId}`);
         const fileName = savePath.split(/[\\/]/).pop() || `telegram_${messageId}`;
+        const promptToken = (req.prompt_token ?? args.promptToken) as number | undefined;
+        this.explicitlyCancelledTransfers.delete(transferId);
         const abort = new AbortController();
         this.activeAborts.set(transferId, abort);
 
         try {
-          const t0 = Date.now();
-          const rawBytes = await this.downloadRawBytes(
-            folderId,
-            messageId,
-            (done, tot) => {
-              const speed = Math.round(done / Math.max(0.1, (Date.now() - t0) / 1000));
-              dispatchLocalEvent('download-progress', {
-                id: transferId,
-                message_id: messageId,
-                progress: tot > 0 ? Math.min(98, Math.round((done / tot) * 98)) : 0,
-                downloaded_bytes: done,
-                total_bytes: tot,
-                speed_bytes_per_sec: speed,
+          const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+          const key = fileCompositeKey(folderId, messageId);
+          const encRecord = this.vault.getEncryptedFileRecord(key);
+          const isEncrypted = Boolean(splitManifest?.encrypted || encRecord);
+
+          // Native Android low-RAM streaming + .tdpart Auto-Resume + Split Auto-Merge path
+          if (isAndroidNative()) {
+            let expectedTotal = 0;
+            if (splitManifest) {
+              expectedTotal = splitManifest.totalSize;
+            } else {
+              const msg = await this.fetchMessage(folderId, messageId);
+              expectedTotal =
+                encRecord?.originalSize ||
+                ((msg.media as unknown as { fileSize?: number })?.fileSize ?? 0);
+            }
+
+            void this.checkEnvironmentForQuietNotices(expectedTotal, 'download');
+
+            if (!isEncrypted) {
+              const resumeKey = `dl_${folderId ?? 'saved'}_${messageId}_${expectedTotal}`;
+              const sink = await TelegramDriveNative.openDownloadSink({
+                resumeKey,
+                expectedTotalBytes: expectedTotal,
               });
-            },
-            abort.signal,
-          );
-          const plain = VaultRuntime.hasEncryptedMagic(rawBytes)
-            ? this.vault.decryptBuffer(rawBytes, {
-                promptToken: (req.prompt_token ?? args.promptToken) as number | undefined,
-              }).plaintext
-            : rawBytes;
+              let currentOffset = sink.existingBytes || 0;
+              const t0 = Date.now();
+              let succeeded = false;
+
+              try {
+                while (currentOffset < expectedTotal || expectedTotal === 0) {
+                  if (abort.signal.aborted) throw new Error('ABORTED');
+                  let flushBuf = new Uint8Array(1024 * 1024);
+                  let flushLen = 0;
+
+                  const flushPending = async () => {
+                    if (flushLen <= 0) return;
+                    const slice = flushBuf.subarray(0, flushLen);
+                    await TelegramDriveNative.appendDownloadChunkBase64({
+                      sinkId: sink.sinkId,
+                      data: uint8ToBase64(slice),
+                    });
+                    currentOffset += flushLen;
+                    flushLen = 0;
+                    const tot = expectedTotal || currentOffset;
+                    const speed = Math.round(
+                      Math.max(0, currentOffset - (sink.existingBytes || 0)) /
+                        Math.max(0.1, (Date.now() - t0) / 1000),
+                    );
+                    dispatchLocalEvent('download-progress', {
+                      id: transferId,
+                      message_id: messageId,
+                      progress: tot > 0 ? Math.min(99, Math.round((currentOffset / tot) * 99)) : 0,
+                      downloaded_bytes: currentOffset,
+                      total_bytes: tot,
+                      speed_bytes_per_sec: speed,
+                    });
+                  };
+
+                  try {
+                    const targetEnd = expectedTotal > 0 ? expectedTotal - 1 : Number.MAX_SAFE_INTEGER;
+                    await this.streamAndroidByteRange(
+                      folderId,
+                      messageId,
+                      currentOffset,
+                      targetEnd,
+                      async chunk => {
+                        let cOff = 0;
+                        while (cOff < chunk.byteLength) {
+                          const space = flushBuf.byteLength - flushLen;
+                          const copyLen = Math.min(space, chunk.byteLength - cOff);
+                          flushBuf.set(chunk.subarray(cOff, cOff + copyLen), flushLen);
+                          flushLen += copyLen;
+                          cOff += copyLen;
+                          if (flushLen >= flushBuf.byteLength) {
+                            await flushPending();
+                          }
+                        }
+                        return !abort.signal.aborted;
+                      },
+                      abort.signal,
+                    );
+                    await flushPending();
+                    break;
+                  } catch (streamErr) {
+                    await flushPending().catch(() => undefined);
+                    if (
+                      abort.signal.aborted ||
+                      this.explicitlyCancelledTransfers.has(transferId) ||
+                      !isTransientAndroidError(streamErr)
+                    ) {
+                      throw streamErr;
+                    }
+                    await waitOnlineOrDelay(3000, abort.signal);
+                  }
+                }
+
+                const finalized = await TelegramDriveNative.finalizeDownloadSink({
+                  sinkId: sink.sinkId,
+                  directory: 'downloads',
+                  filename: fileName,
+                  mimeType: guessMimeType(fileName),
+                });
+                succeeded = true;
+                this.saveState();
+                dispatchLocalEvent('download-progress', {
+                  id: transferId,
+                  message_id: messageId,
+                  progress: 100,
+                  downloaded_bytes: currentOffset,
+                  total_bytes: expectedTotal || currentOffset,
+                  speed_bytes_per_sec: 0,
+                });
+                return { finalPath: finalized.path, outcome: 'saved' };
+              } finally {
+                if (!succeeded) {
+                  await TelegramDriveNative.abortDownloadSink({
+                    sinkId: sink.sinkId,
+                    deletePartial: this.explicitlyCancelledTransfers.has(transferId),
+                  }).catch(() => undefined);
+                }
+              }
+            }
+
+            // Encrypted split file on Android Native: decrypt part-by-part into sink
+            if (splitManifest && splitManifest.parts.length > 0) {
+              const resolvedPassphrase =
+                (splitManifest.encrypted?.mode === 'passphrase' || encRecord?.mode === 'passphrase') &&
+                promptToken !== undefined
+                  ? this.vault.consumeStagedPassphrase(promptToken)
+                  : undefined;
+
+              const sink = await TelegramDriveNative.openDownloadSink({
+                resumeKey: `dl_enc_${folderId ?? 'saved'}_${messageId}_${Date.now()}`,
+                expectedTotalBytes: 0,
+              });
+              let writtenPlain = 0;
+              let succeeded = false;
+              const t0 = Date.now();
+              try {
+                for (let idx = 0; idx < splitManifest.parts.length; idx++) {
+                  if (abort.signal.aborted) throw new Error('ABORTED');
+                  const part = splitManifest.parts[idx];
+                  const cipherPart = await this.runWithTransientRetry(transferId, abort.signal, () =>
+                    this.downloadRawBytes(
+                      folderId,
+                      part.id,
+                      (done, tot) => {
+                        const approx = writtenPlain + Math.round((done / Math.max(1, tot)) * part.size);
+                        const speed = Math.round(approx / Math.max(0.1, (Date.now() - t0) / 1000));
+                        dispatchLocalEvent('download-progress', {
+                          id: transferId,
+                          message_id: messageId,
+                          progress: Math.min(99, Math.round((approx / Math.max(1, expectedTotal)) * 99)),
+                          downloaded_bytes: approx,
+                          total_bytes: expectedTotal,
+                          speed_bytes_per_sec: speed,
+                          part_index: idx + 1,
+                          part_count: splitManifest.parts.length,
+                        });
+                      },
+                      abort.signal,
+                    ),
+                  );
+                  const plainPart = VaultRuntime.hasEncryptedMagic(cipherPart)
+                    ? this.vault.decryptBuffer(cipherPart, { passphrase: resolvedPassphrase }).plaintext
+                    : cipherPart;
+
+                  const step = 1024 * 1024;
+                  for (let pOff = 0; pOff < plainPart.byteLength; pOff += step) {
+                    const sub = plainPart.subarray(pOff, Math.min(plainPart.byteLength, pOff + step));
+                    await TelegramDriveNative.appendDownloadChunkBase64({
+                      sinkId: sink.sinkId,
+                      data: uint8ToBase64(sub),
+                    });
+                  }
+                  writtenPlain += plainPart.byteLength;
+                }
+                const finalized = await TelegramDriveNative.finalizeDownloadSink({
+                  sinkId: sink.sinkId,
+                  directory: 'downloads',
+                  filename: fileName,
+                  mimeType: guessMimeType(fileName),
+                });
+                succeeded = true;
+                this.saveState();
+                dispatchLocalEvent('download-progress', {
+                  id: transferId,
+                  message_id: messageId,
+                  progress: 100,
+                  downloaded_bytes: writtenPlain,
+                  total_bytes: writtenPlain,
+                  speed_bytes_per_sec: 0,
+                });
+                return { finalPath: finalized.path, outcome: 'saved' };
+              } finally {
+                if (!succeeded) {
+                  await TelegramDriveNative.abortDownloadSink({
+                    sinkId: sink.sinkId,
+                    deletePartial: true,
+                  }).catch(() => undefined);
+                }
+              }
+            }
+          }
+
+          // Fallback (encrypted single file or browser test mode)
+          const t0 = Date.now();
+          let plain: Uint8Array;
+          if (splitManifest && splitManifest.parts.length > 0) {
+            const resolvedPassphrase =
+              splitManifest.encrypted?.mode === 'passphrase' && promptToken !== undefined
+                ? this.vault.consumeStagedPassphrase(promptToken)
+                : undefined;
+            const partBuffers: Uint8Array[] = [];
+            let totalLen = 0;
+            for (const part of splitManifest.parts) {
+              const rawPart = await this.downloadRawBytes(folderId, part.id, undefined, abort.signal);
+              const dec = VaultRuntime.hasEncryptedMagic(rawPart)
+                ? this.vault.decryptBuffer(rawPart, { passphrase: resolvedPassphrase }).plaintext
+                : rawPart;
+              partBuffers.push(dec);
+              totalLen += dec.byteLength;
+            }
+            plain = new Uint8Array(totalLen);
+            let off = 0;
+            for (const b of partBuffers) {
+              plain.set(b, off);
+              off += b.byteLength;
+            }
+          } else {
+            const rawBytes = await this.runWithTransientRetry(transferId, abort.signal, () =>
+              this.downloadRawBytes(
+                folderId,
+                messageId,
+                (done, tot) => {
+                  const speed = Math.round(done / Math.max(0.1, (Date.now() - t0) / 1000));
+                  dispatchLocalEvent('download-progress', {
+                    id: transferId,
+                    message_id: messageId,
+                    progress: tot > 0 ? Math.min(98, Math.round((done / tot) * 98)) : 0,
+                    downloaded_bytes: done,
+                    total_bytes: tot,
+                    speed_bytes_per_sec: speed,
+                  });
+                },
+                abort.signal,
+              ),
+            );
+            plain = VaultRuntime.hasEncryptedMagic(rawBytes)
+              ? this.vault.decryptBuffer(rawBytes, { promptToken }).plaintext
+              : rawBytes;
+          }
 
           let finalPath = savePath;
           if (isAndroidNative()) {
@@ -1294,11 +2671,14 @@ class AndroidWebEngine {
           return { finalPath, outcome: 'saved' };
         } finally {
           this.activeAborts.delete(transferId);
+          this.explicitlyCancelledTransfers.delete(transferId);
         }
       }
 
       case 'cmd_cancel_transfer': {
-        this.activeAborts.get(String(args.transferId ?? args.id ?? ''))?.abort();
+        const id = String(args.transferId ?? args.id ?? '');
+        if (id) this.explicitlyCancelledTransfers.add(id);
+        this.activeAborts.get(id)?.abort();
         return null;
       }
 
@@ -1737,8 +3117,27 @@ class AndroidWebEngine {
       case 'cmd_transfer_activity':
         return { activeCount: this.activeAborts.size, pausedCount: 0, queuedCount: 0 };
 
-      case 'cmd_get_stream_info':
-        return null;
+      case 'cmd_get_stream_info': {
+        if (!isAndroidNative()) return null;
+        if (args.messageId !== undefined && args.messageId !== null) {
+          const folderId =
+            args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
+          const messageId = Number(args.messageId);
+          const key = fileCompositeKey(folderId, messageId);
+          const encRec = this.vault.getEncryptedFileRecord(key);
+          const splitManifest = await this.ensureSplitManifestLoaded(folderId, messageId).catch(() => null);
+          if (encRec || splitManifest?.encrypted) {
+            return null;
+          }
+        }
+        const srv = await this.ensureAndroidMediaServer();
+        return {
+          port: srv.port,
+          token: srv.token,
+          base_url: srv.baseUrl,
+          operation_token: null,
+        };
+      }
 
       case 'cmd_get_video_metadata':
         return {

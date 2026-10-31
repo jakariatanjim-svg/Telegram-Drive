@@ -429,7 +429,17 @@
     "hide_passphrase": "Itago ang passphrase",
     "current_vault_passphrase": "Kasalukuyang passphrase ng vault",
     "videoFilenameCaption": "Pangalan ng file sa caption",
-    "videoFilenameCaptionDesc": "Idagdag ang orihinal na pangalan ng file sa mga video message. Nananatili itong pribado sa mga naka-encrypt na upload."
+    "videoFilenameCaptionDesc": "Idagdag ang orihinal na pangalan ng file sa mga video message. Nananatili itong pribado sa mga naka-encrypt na upload.",
+    "ffmpeg_install_in_app": "I-install ang FFmpeg sa loob ng App",
+    "ffmpeg_installing": "Ini-install ang FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Ini-extract ang FFmpeg sa data/bin…",
+    "ffmpeg_installed_ready": "Nakita at handa na ang FFmpeg",
+    "ffmpeg_install_success": "Na-install na ang FFmpeg sa data/bin at handa nang gamitin.",
+    "data_saver_mode": "Pantipid ng Data",
+    "data_saver_desc": "Laktawan ang background na pag-load ng thumbnail at limitahan ang media buffer para makatipid sa mobile data.",
+    "notice_split_file": "Awtomatikong pinoproseso ang malaking file ({{name}}) sa {{count}} bahagi — lilitaw pa rin ito bilang iisang file.",
+    "notice_ultra_low_ram": "Low-RAM na telepono ang nadetect: gumagamit ng ligtas sa memory na chunk streaming ang malalaking file, bagama’t maaaring mag-buffer nang bahagya kapag maraming nakabukas na app.",
+    "notice_mobile_data_large": "Gumagamit ng mobile data para sa malaking file ({{size}}). Buksan ang Pantipid ng Data sa Settings anumang oras para bawasan ang konsumo."
   },
   "files": {
     "download": "I-download",

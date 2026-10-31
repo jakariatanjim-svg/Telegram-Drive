@@ -11,7 +11,8 @@ const DesktopDashboard = React.lazy(() => import("./components/desktop/DesktopDa
 const MobileDashboard = React.lazy(() => import("./components/mobile/MobileDashboard"));
 const AuthWizard = React.lazy(() => import("./components/shared/AuthWizard").then(m => ({ default: m.AuthWizard })));
 
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
+import { listen } from "@tauri-apps/api/event";
 import { useTheme } from "./context/ThemeContext";
 import { usePlatform } from "./hooks/usePlatform";
 import { TelegramCooldownBanner } from "./components/shared/TelegramCooldownBanner";
@@ -25,6 +26,8 @@ import { version as appVersion } from "../package.json";
 import { consumeWhatsNew, type WhatsNewDetails } from "./services/updateReliability";
 import { ensureLanguageResource } from "./i18n";
 import { publishNativeLanguage } from "./services/nativeLanguage";
+import { setDataSaverActive } from "./services/imagePreviewCache";
+import { formatBytes } from "./utils";
 
 type AuthStatus = "loading" | "authenticated" | "unauthenticated";
 
@@ -99,6 +102,72 @@ function AppContent() {
       document.body.classList.remove('performance-mode');
     }
   }, [settings.performanceMode, isLoaded]);
+
+  // Sync Data Saver mode to preview cache & Android native media streamer
+  useEffect(() => {
+    if (!isLoaded) return;
+    setDataSaverActive(Boolean(settings.dataSaverMode));
+    if (isMobile) {
+      void invoke('cmd_set_data_saver_mode', { enabled: Boolean(settings.dataSaverMode) }).catch(() => {});
+    }
+  }, [settings.dataSaverMode, isLoaded, isMobile]);
+
+  // Non-blocking quiet notices for split large files, once-ever ultra-low-RAM phones, and once-per-session Mobile Data
+  useEffect(() => {
+    let disposed = false;
+    const seenSplitIds = new Set<string>();
+    const unlisteners: Array<() => void> = [];
+
+    void listen<{ id?: string; fileName: string; totalBytes: number; partCount: number }>(
+      'split-file-notice',
+      ({ payload }) => {
+        if (disposed || !payload) return;
+        const dedupeKey = payload.id || `${payload.fileName}:${payload.totalBytes}`;
+        if (seenSplitIds.has(dedupeKey)) return;
+        seenSplitIds.add(dedupeKey);
+        toast.info(
+          t('settings.notice_split_file', {
+            name: payload.fileName,
+            count: payload.partCount,
+          }),
+          { duration: 4500 },
+        );
+      },
+    )
+      .then(fn => {
+        if (disposed) fn();
+        else unlisteners.push(fn);
+      })
+      .catch(() => {});
+
+    void listen<{
+      kind: 'ultra-low-ram' | 'mobile-data';
+      sizeBytes?: number;
+      dataSaverActive?: boolean;
+    }>('quiet-hardware-notice', ({ payload }) => {
+      if (disposed || !payload) return;
+      if (payload.kind === 'ultra-low-ram') {
+        toast.info(t('settings.notice_ultra_low_ram'), { duration: 6000 });
+      } else if (payload.kind === 'mobile-data' && !payload.dataSaverActive) {
+        toast.info(
+          t('settings.notice_mobile_data_large', {
+            size: formatBytes(payload.sizeBytes ?? 0),
+          }),
+          { duration: 5000 },
+        );
+      }
+    })
+      .then(fn => {
+        if (disposed) fn();
+        else unlisteners.push(fn);
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      for (const fn of unlisteners) fn();
+    };
+  }, [t]);
 
   // On mount: check for a saved session and auto-restore it.
   // This is the SINGLE source of truth for the initial connection.

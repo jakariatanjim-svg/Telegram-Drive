@@ -429,7 +429,17 @@
     "hide_passphrase": "Hide passphrase",
     "current_vault_passphrase": "Current vault passphrase",
     "videoFilenameCaption": "Filename captions",
-    "videoFilenameCaptionDesc": "Add the original filename to video media messages. Encrypted uploads keep it private."
+    "videoFilenameCaptionDesc": "Add the original filename to video media messages. Encrypted uploads keep it private.",
+    "ffmpeg_install_in_app": "Install FFmpeg in App",
+    "ffmpeg_installing": "Installing FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Extracting FFmpeg into data/bin…",
+    "ffmpeg_installed_ready": "FFmpeg detected & ready",
+    "ffmpeg_install_success": "FFmpeg installed inside data/bin and ready to use.",
+    "data_saver_mode": "Data Saver",
+    "data_saver_desc": "Skip background thumbnail prefetching and limit media read-ahead to save mobile data.",
+    "notice_split_file": "Large file ({{name}}) is being handled automatically in {{count}} parts — it will appear as a single file.",
+    "notice_ultra_low_ram": "Low-RAM phone detected: large files use memory-safe chunk streaming, though heavy multitasking may cause slight buffering.",
+    "notice_mobile_data_large": "Using mobile data for a large file ({{size}}). Turn on Data Saver in Settings anytime to reduce extra data usage."
   },
   "files": {
     "download": "Download",

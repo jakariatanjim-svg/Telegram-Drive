@@ -60,6 +60,7 @@ export interface Settings {
   autoDetectVpn: boolean;
   archiveMaxBytes: number;
   performanceMode: boolean;
+  dataSaverMode: boolean;
   transcodeCacheMaxGb: number;
   encryptionDefaultMode: 'standard' | 'vault' | 'passphrase' | 'vault_and_passphrase';
   encryptionProtectMetadata: boolean;

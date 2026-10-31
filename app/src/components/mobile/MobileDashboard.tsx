@@ -1131,6 +1131,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                   </div>
                   <span className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${transferAllowed ? 'bg-emerald-400' : 'bg-amber-400'}`} title={transferWaitingReason} />
                 </div>
+                <MobileSettingToggle checked={settings.dataSaverMode} label={t('settings.data_saver_mode')} description={t('settings.data_saver_desc')} onChange={() => updateSetting('dataSaverMode', !settings.dataSaverMode)} />
                 <MobileSettingToggle checked={settings.androidWifiOnlyTransfers} label="Wi-Fi only" description="Wait for an unmetered network before uploading or downloading." onChange={() => updateSetting('androidWifiOnlyTransfers', !settings.androidWifiOnlyTransfers)} />
                 <MobileSettingToggle checked={settings.androidAllowRoaming} label="Allow roaming" description="Disabled by default to prevent unexpected carrier charges." onChange={() => updateSetting('androidAllowRoaming', !settings.androidAllowRoaming)} />
                 <MobileSettingToggle checked={settings.androidRequireCharging} label="Require charging" description="Only run queued transfers while external power is connected." onChange={() => updateSetting('androidRequireCharging', !settings.androidRequireCharging)} />
@@ -1138,7 +1139,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                 <label className="mt-3 flex items-center justify-between gap-3 text-xs">
                   <span><span className="block font-medium text-telegram-text">Free-space reserve</span><span className="mt-0.5 block text-[10px] text-telegram-subtext">Downloads never consume this reserve.</span></span>
                   <select value={settings.androidMinimumFreeStorageGb} onChange={event => updateSetting('androidMinimumFreeStorageGb', Number(event.target.value))} className="min-h-11 rounded-lg border border-telegram-border bg-telegram-bg px-3 text-xs text-telegram-text">
-                    {[1, 2, 5, 10].map(value => <option key={value} value={value}>{value} GB</option>)}
+                    {[0.5, 1, 2, 5, 10].map(value => <option key={value} value={value}>{value} GB</option>)}
                   </select>
                 </label>
                 {!transferAllowed && <p className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-[10px] text-amber-300">{transferWaitingReason}</p>}

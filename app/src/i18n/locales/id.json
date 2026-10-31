@@ -429,7 +429,17 @@
     "hide_passphrase": "Sembunyikan frasa sandi",
     "current_vault_passphrase": "Frasa sandi brankas saat ini",
     "videoFilenameCaption": "Nama berkas sebagai keterangan",
-    "videoFilenameCaptionDesc": "Tambahkan nama berkas asli ke pesan video. Unggahan terenkripsi menjaga nama tetap pribadi."
+    "videoFilenameCaptionDesc": "Tambahkan nama berkas asli ke pesan video. Unggahan terenkripsi menjaga nama tetap pribadi.",
+    "ffmpeg_install_in_app": "Pasang FFmpeg di Aplikasi",
+    "ffmpeg_installing": "Memasang FFmpeg ({{percent}}%)…",
+    "ffmpeg_extracting": "Mengekstrak FFmpeg ke data/bin…",
+    "ffmpeg_installed_ready": "FFmpeg terdeteksi & siap",
+    "ffmpeg_install_success": "FFmpeg berhasil dipasang di data/bin dan siap digunakan.",
+    "data_saver_mode": "Penghemat Data",
+    "data_saver_desc": "Lewati pramuat thumbnail latar belakang dan batasi buffer media untuk menghemat kuota data seluler.",
+    "notice_split_file": "File besar ({{name}}) diproses otomatis dalam {{count}} bagian — tetap tampil sebagai satu file utuh.",
+    "notice_ultra_low_ram": "Ponsel RAM rendah terdeteksi: file besar memakai streaming potong-blok hemat memori, meski multitasking berat dapat memicu sedikit buffering.",
+    "notice_mobile_data_large": "Menggunakan data seluler untuk file besar ({{size}}). Aktifkan Penghemat Data di Pengaturan kapan saja untuk menghemat kuota."
   },
   "files": {
     "download": "Unduh",

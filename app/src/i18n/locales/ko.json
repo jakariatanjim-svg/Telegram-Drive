@@ -429,7 +429,17 @@
     "hide_passphrase": "암호 문구 숨기기",
     "current_vault_passphrase": "현재 보관함 암호",
     "videoFilenameCaption": "파일 이름 캡션",
-    "videoFilenameCaptionDesc": "동영상 메시지에 원래 파일 이름을 추가합니다. 암호화된 업로드에서는 이름이 공개되지 않습니다."
+    "videoFilenameCaptionDesc": "동영상 메시지에 원래 파일 이름을 추가합니다. 암호화된 업로드에서는 이름이 공개되지 않습니다.",
+    "ffmpeg_install_in_app": "앱 내에서 FFmpeg 설치",
+    "ffmpeg_installing": "FFmpeg 설치 중 ({{percent}}%)…",
+    "ffmpeg_extracting": "data/bin에 FFmpeg 압축 해제 중…",
+    "ffmpeg_installed_ready": "FFmpeg 감지됨 및 준비 완료",
+    "ffmpeg_install_success": "FFmpeg가 data/bin 폴더에 설치되어 바로 사용할 수 있습니다.",
+    "data_saver_mode": "데이터 절약 모드",
+    "data_saver_desc": "모바일 데이터를 절약하기 위해 백그라운드 썸네일 미리 로드를 건너뛰고 미디어 버퍼를 제한합니다.",
+    "notice_split_file": "대용량 파일({{name}})이 {{count}}개 파트로 자동 처리 중이며 폴더에는 단일 파일로 표시됩니다.",
+    "notice_ultra_low_ram": "저사양 RAM 기기 감지됨: 대용량 파일에 메모리 안전 청크 스트리밍이 적용되나 무거운 멀티태스킹 시 약간의 버퍼링이 있을 수 있습니다.",
+    "notice_mobile_data_large": "대용량 파일({{size}})에 모바일 데이터를 사용 중입니다. 설정에서 언제든 데이터 절약 모드를 켜서 데이터 소모를 줄일 수 있습니다."
   },
   "files": {
     "download": "다운로드",

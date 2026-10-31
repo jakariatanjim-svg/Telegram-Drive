@@ -1307,6 +1307,14 @@ export function AdaptiveMediaPlayer({
                     <FfmpegInstallNotice
                         available={transcodeCapabilities?.available ?? transcodeCapabilities?.ffmpeg_available}
                         variant="player"
+                        onInstalled={() => {
+                            void invoke<TranscodeCapabilities>('cmd_get_transcode_capabilities')
+                                .then(caps => {
+                                    setTranscodeCapabilities(caps);
+                                    transcodeCapsRef.current = caps;
+                                })
+                                .catch(() => {});
+                        }}
                     />
                 )}
 

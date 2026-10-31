@@ -429,7 +429,17 @@
     "hide_passphrase": "Parola ifadesini gizle",
     "current_vault_passphrase": "Geçerli kasa parolası",
     "videoFilenameCaption": "Dosya adı açıklamaları",
-    "videoFilenameCaptionDesc": "Video mesajlarına özgün dosya adını ekleyin. Şifreli yüklemelerde ad gizli kalır."
+    "videoFilenameCaptionDesc": "Video mesajlarına özgün dosya adını ekleyin. Şifreli yüklemelerde ad gizli kalır.",
+    "ffmpeg_install_in_app": "Uygulama İçinden FFmpeg Kur",
+    "ffmpeg_installing": "FFmpeg kuruluyor ({{percent}}%)…",
+    "ffmpeg_extracting": "FFmpeg data/bin klasörüne çıkarılıyor…",
+    "ffmpeg_installed_ready": "FFmpeg algılandı ve hazır",
+    "ffmpeg_install_success": "FFmpeg data/bin içine kuruldu ve kullanıma hazır.",
+    "data_saver_mode": "Veri Tasarrufu",
+    "data_saver_desc": "Mobil veriyi korumak için arka planda küçük resim önyüklemesini atlar ve medya önbelleğini sınırlar.",
+    "notice_split_file": "Büyük dosya ({{name}}) otomatik olarak {{count}} parça halinde işleniyor — tek bir dosya olarak görünecektir.",
+    "notice_ultra_low_ram": "Düşük RAM’li telefon algılandı: büyük dosyalar bellek dostu parça akışı kullanır, ancak yoğun çoklu görevde hafif önbellekleme olabilir.",
+    "notice_mobile_data_large": "Büyük bir dosya ({{size}}) için mobil veri kullanılıyor. Ek veri kullanımını azaltmak için Ayarlar’dan Veri Tasarrufu’nu açabilirsiniz."
   },
   "files": {
     "download": "İndir",
