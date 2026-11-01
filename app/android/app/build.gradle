@@ -5,8 +5,9 @@ def rawReleaseVersion = (System.getenv("RELEASE_VERSION") ?: "1.0").replaceFirst
 def versionSegments = rawReleaseVersion.tokenize('.')
 def parsedMajor = (versionSegments.size() > 0 && versionSegments[0].isInteger()) ? versionSegments[0].toInteger() : 1
 def parsedMinor = (versionSegments.size() > 1 && versionSegments[1].isInteger()) ? versionSegments[1].toInteger() : 0
-def computedVersionCode = Math.max(1, (parsedMajor * 10) + parsedMinor)
-def computedVersionName = "${parsedMajor}.${parsedMinor}"
+def parsedPatch = (versionSegments.size() > 2 && versionSegments[2].isInteger()) ? versionSegments[2].toInteger() : 0
+def computedVersionCode = Math.max(1, (parsedMajor * 100) + (parsedMinor * 10) + parsedPatch)
+def computedVersionName = (versionSegments.size() > 2 && versionSegments[2].isInteger()) ? "${parsedMajor}.${parsedMinor}.${parsedPatch}" : "${parsedMajor}.${parsedMinor}"
 
 def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 def keystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")

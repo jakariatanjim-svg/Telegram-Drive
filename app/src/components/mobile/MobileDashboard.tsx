@@ -25,8 +25,8 @@ import { TelegramFile, TelegramFolder, ShareInfo, BandwidthStats } from '../../t
 import { useSettings } from '../../context/SettingsContext';
 import { useUpdates } from '../../context/UpdateContext';
 import { version as rawAppVersion } from '../../../package.json';
-import { formatDisplayVersion } from '../../../shared/versioning';
-const appVersion = formatDisplayVersion(rawAppVersion, '1.0');
+import { formatDisplayVersion, resolveRuntimeAppVersion } from '../../../shared/versioning';
+const appVersion = formatDisplayVersion(resolveRuntimeAppVersion(rawAppVersion), '1.0');
 import { LANGUAGES } from '../../i18n/languages';
 import { useTranslation } from 'react-i18next';
 import { useConfirm } from '../../context/ConfirmContext';

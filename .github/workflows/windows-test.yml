@@ -1,3 +1,6 @@
+# DOES: Builds the Windows Portable Install test executable from any branch using a non-advancing version label and uploads a 7-day artifact.
+# DOES NOT: Create git tags, publish GitHub Releases, or commit version changes.
+
 name: Windows — Test Build
 
 on:
@@ -6,17 +9,94 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows-test:
     runs-on: windows-latest
     timeout-minutes: 25
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      RELEASE_VERSION: "0.0-test"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository with tags
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute candidate version label (does not advance sequence)
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RAW_BRANCH: ${{ github.ref_name }}
+          FULL_SHA: ${{ github.sha }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          git fetch --tags --force
+
+          function Parse-ReleaseVersion([string]$raw) {
+            if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+            $c = $raw.Trim() -replace '^[vV]', ''
+            if ($c -match '^(\d+)\.([0-9])$') {
+              return [PSCustomObject]@{
+                Major = [int]$Matches[1]; Minor = [int]$Matches[2]; Patch = -1; SortPatch = 0
+                Segments = 2; Display = "$($Matches[1]).$($Matches[2])"
+              }
+            }
+            if ($c -match '^(\d+)\.([0-9])\.([0-9])$') {
+              return [PSCustomObject]@{
+                Major = [int]$Matches[1]; Minor = [int]$Matches[2]; Patch = [int]$Matches[3]; SortPatch = [int]$Matches[3]
+                Segments = 3; Display = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+              }
+            }
+            return $null
+          }
+
+          function Step-ReleaseVersion($v) {
+            if ($v.Segments -eq 3) {
+              if ($v.Patch -lt 9) { return Parse-ReleaseVersion "$($v.Major).$($v.Minor).$($v.Patch + 1)" }
+              elseif ($v.Minor -lt 9) { return Parse-ReleaseVersion "$($v.Major).$($v.Minor + 1).0" }
+              else { return Parse-ReleaseVersion "$($v.Major + 1).0.0" }
+            } else {
+              if ($v.Minor -lt 9) { return Parse-ReleaseVersion "$($v.Major).$($v.Minor + 1)" }
+              else { return Parse-ReleaseVersion "$($v.Major + 1).0" }
+            }
+          }
+
+          $allTags = @(git tag --list "v*")
+          $validTagObjs = @()
+          foreach ($t in $allTags) {
+            $p = Parse-ReleaseVersion $t
+            if ($null -ne $p -and "v$($p.Display)" -eq $t) { $validTagObjs += $p }
+          }
+          $highestExisting = $validTagObjs | Sort-Object -Property Major, Minor, SortPatch, Segments | Select-Object -Last 1
+
+          $latestRelTag = ""
+          try { $latestRelTag = (gh release view --json tagName -q .tagName 2>$null) } catch {}
+          $baseline = Parse-ReleaseVersion "$latestRelTag"
+          if ($null -eq $baseline) { $baseline = $highestExisting }
+
+          if ($null -eq $baseline) {
+            $nextObj = Parse-ReleaseVersion "1.0"
+          } else {
+            $nextObj = Step-ReleaseVersion $baseline
+            while ($allTags -contains "v$($nextObj.Display)") {
+              $nextObj = Step-ReleaseVersion $nextObj
+            }
+          }
+
+          $labelVer = $nextObj.Display
+          $semverVer = if ($nextObj.Segments -eq 2) { "$labelVer.0" } else { $labelVer }
+          $cleanBranch = ($env:RAW_BRANCH -replace '[^A-Za-z0-9._-]', '-') -replace '-+', '-'
+          $shortSha = $env:FULL_SHA.Substring(0, 7)
+          $artifactName = "$($env:REPO_NAME)-$cleanBranch-$shortSha-v$labelVer"
+
+          "version=$labelVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "semver=$semverVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
@@ -29,26 +109,59 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Ephemerally inject test build version (never committed)
+        working-directory: app
+        shell: pwsh
+        env:
+          TARGET_SEMVER: ${{ steps.ver.outputs.semver }}
+        run: |
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_SEMVER;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+
       - name: Validate locales
         working-directory: app
         run: npm run i18n:validate
 
       - name: Build Windows portable installer
         working-directory: app
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          VITE_RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: npm run dist:win
 
       - name: Verify single portable setup executable
         shell: pwsh
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          LABEL_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          $exe = "app/release/Telegram-Drive-0.0-test-portable-setup.exe"
+          $exe = "app/release/$($env:REPO_NAME)-$($env:LABEL_VERSION)-portable-setup.exe"
           if (-not (Test-Path -LiteralPath $exe)) {
-            throw "Expected installer not found at $exe"
+            Write-Host "::error::Expected installer not found at '$exe'."
+            exit 1
           }
 
       - name: Upload installer run artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Telegram-Drive-windows-test-portable-setup
-          path: app/release/Telegram-Drive-0.0-test-portable-setup.exe
+          name: ${{ steps.ver.outputs.artifact_name }}
+          path: app/release/${{ github.event.repository.name }}-${{ steps.ver.outputs.version }}-portable-setup.exe
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
+          compression-level: 0
+
+      - name: Write run summary
+        shell: pwsh
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          LABEL_VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACT_NAME: ${{ steps.ver.outputs.artifact_name }}
+        run: |
+          @(
+            "### Windows — Test Build",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Branch | ``$($env:BRANCH_NAME)`` |",
+            "| Label Version | ``v$($env:LABEL_VERSION)`` (test label only) |",
+            "| Tag | None (test build) |",
+            "| Artifact | ``$($env:ARTIFACT_NAME)`` |"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

@@ -1,10 +1,24 @@
+# DOES: Add-on release workflow — reads the Latest GitHub Release version (vX.Y or vX.Y.Z), builds & signs the Android APK
+#       with the permanent keystore, verifies signature with apksigner, and uploads it into that Latest release.
+# DOES NOT: Create new versions, tags, or releases, touch release titles/notes, or commit version bumps.
+
 name: Android — Release
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Confirm running release from a non-default branch"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-android-addon
+  cancel-in-progress: false
 
 jobs:
   release-android:
@@ -12,6 +26,17 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Check release branch guard
+        env:
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CONFIRMED: ${{ inputs.confirm }}
+        run: |
+          if [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ] && [ "$CONFIRMED" != "true" ]; then
+            echo "::error::Release runs on non-default branch '$CURRENT_BRANCH' require checking the 'confirm' input box (or run from '$DEFAULT_BRANCH')."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -21,17 +46,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          REL_URL=$(gh release view --json url -q .url 2>/dev/null || true)
           if [ -z "$TAG" ]; then
-            echo "No existing GitHub Release found. Run 'Windows — Release (Primary)' first to create a vX.Y release." >&2
+            echo "::error::No existing GitHub Release found. Run 'Windows — Release (Primary)' first."
             exit 1
           fi
           VERSION="${TAG#v}"
-          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]$'; then
-            echo "Latest release tag '$TAG' does not match expected vX.Y format." >&2
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9](\.[0-9])?$'; then
+            echo "::error::Latest release tag '$TAG' has no valid vX.Y or vX.Y.Z version. Run 'Windows — Release (Primary)' first."
             exit 1
+          fi
+          if echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]$'; then
+            SEMVER="${VERSION}.0"
+          else
+            SEMVER="${VERSION}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "release_url=$REL_URL" >> "$GITHUB_OUTPUT"
           echo "Attaching Android APK to existing release: $TAG"
 
       - name: Validate permanent signing secrets
@@ -43,7 +76,7 @@ jobs:
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -z "$KS_B64" ] || [ -z "$KS_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
-            echo "Missing Android signing secrets (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD)." >&2
+            echo "::error::Missing Android signing secrets. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
           KS_FILE="${RUNNER_TEMP}/telegram-drive-release.p12"
@@ -71,12 +104,15 @@ jobs:
       - name: Ephemerally inject release version (never committed)
         working-directory: app
         env:
-          TARGET_VERSION: ${{ steps.rel.outputs.version }}
+          TARGET_SEMVER: ${{ steps.rel.outputs.semver }}
         run: |
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_VERSION+'.0';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_SEMVER;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Validate locales & sync Capacitor Android
         working-directory: app
+        env:
+          RELEASE_VERSION: ${{ steps.rel.outputs.version }}
+          VITE_RELEASE_VERSION: ${{ steps.rel.outputs.version }}
         run: |
           npm run i18n:validate
           npm run cap:sync
@@ -93,21 +129,58 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon
 
-      - name: Attach signed APK to latest GitHub Release
+      - name: Verify APK signature & attach to latest GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
           REL_TAG: ${{ steps.rel.outputs.tag }}
           REL_VERSION: ${{ steps.rel.outputs.version }}
         run: |
           APK_OUT="app/android/app/build/outputs/apk/release/app-release.apk"
           if [ ! -f "$APK_OUT" ]; then
-            echo "Expected signed release APK at $APK_OUT was not produced." >&2
+            echo "::error::Expected signed release APK at '$APK_OUT' was not produced."
             exit 1
           fi
-          CLEAN_APK="${RUNNER_TEMP}/Telegram-Drive-${REL_VERSION}.apk"
+
+          # Verify APK signature and log certificate digests with Android SDK apksigner
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found in ANDROID_HOME/build-tools."
+            exit 1
+          fi
+          "$APKSIGNER" verify --print-certs "$APK_OUT"
+
+          ASSET_NAME="${REPO_NAME}-${REL_VERSION}.apk"
+          CLEAN_APK="${RUNNER_TEMP}/${ASSET_NAME}"
           cp "$APK_OUT" "$CLEAN_APK"
+
+          # Remove any older-named .apk assets on this release so exactly one APK remains
+          EXISTING_APKS=$(gh release view "$REL_TAG" --json assets -q '.assets[].name' | grep -E '\.apk$' || true)
+          while IFS= read -r old_apk; do
+            if [ -n "$old_apk" ] && [ "$old_apk" != "$ASSET_NAME" ]; then
+              gh release delete-asset "$REL_TAG" "$old_apk" --yes || true
+            fi
+          done <<< "$EXISTING_APKS"
+
           gh release upload "$REL_TAG" "$CLEAN_APK" --clobber
+
+      - name: Write run summary
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          REL_VERSION: ${{ steps.rel.outputs.version }}
+          REL_TAG: ${{ steps.rel.outputs.tag }}
+          REL_URL: ${{ steps.rel.outputs.release_url }}
+        run: |
+          {
+            echo "### Android — Release"
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Branch | \`${BRANCH_NAME}\` |"
+            echo "| Version | \`${REL_VERSION}\` |"
+            echo "| Tag | \`${REL_TAG}\` |"
+            echo "| Release | ${REL_URL} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean temporary keystore and staged APK
         if: always()
-        run: rm -f "${RUNNER_TEMP}/telegram-drive-release.p12" "${RUNNER_TEMP}"/Telegram-Drive-*.apk
+        run: rm -f "${RUNNER_TEMP}/telegram-drive-release.p12" "${RUNNER_TEMP}"/*.apk

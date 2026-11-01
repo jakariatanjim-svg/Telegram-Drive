@@ -22,7 +22,9 @@ import { useTranslation } from "react-i18next";
 
 import { getLanguageInfo } from "./i18n/languages";
 import { resolveLanguagePreference } from "./i18n/resolveLanguage";
-import { version as appVersion } from "../package.json";
+import { version as rawPkgVersion } from "../package.json";
+import { resolveRuntimeAppVersion } from "../shared/versioning";
+const appVersion = resolveRuntimeAppVersion(rawPkgVersion);
 import { consumeWhatsNew, type WhatsNewDetails } from "./services/updateReliability";
 import { ensureLanguageResource } from "./i18n";
 import { publishNativeLanguage } from "./services/nativeLanguage";
