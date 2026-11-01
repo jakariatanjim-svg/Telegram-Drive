@@ -1,7 +1,7 @@
 import i18n from '../../../i18n';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Loader2, Languages, Play, Palette, Tag, Search, Database, FolderSync } from 'lucide-react';
+import { X, RotateCcw, Download, Upload, Trash2, HardDrive, Globe, Key, Copy, Check, RefreshCw, FolderArchive, Shield, Zap, Activity, Gauge, Wifi, ChevronDown, Link, Sparkles, Info, Loader2, Languages, Play, Palette, Tag, Search, Database, FolderSync, QrCode, Smartphone } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useSettings } from '../../../context/SettingsContext';
@@ -27,6 +27,7 @@ import { useActionScope } from '../../../hooks/useActionScope';
 import { useUpdates } from '../../../context/UpdateContext';
 import { BandwidthSettings } from './settings/BandwidthSettings';
 import { PortableMigrationSection } from './settings/PortableMigrationSection';
+import { DeviceLinkGeneratorModal } from '../../shared/DeviceLinkGeneratorModal';
 import { applyProxySettings, applyVpnSettings } from '../../../services/networkSettings';
 
 interface SettingsModalProps {
@@ -83,6 +84,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
     const [offlineCacheError, setOfflineCacheError] = useState<string | null>(null);
     const [clearingVariant, setClearingVariant] = useState<string | null>(null); // file_key:quality being cleared
     const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+    const [deviceLinkModalOpen, setDeviceLinkModalOpen] = useState(false);
     const [settingsSearch, setSettingsSearch] = useState('');
     const [showGeneralAdvanced, setShowGeneralAdvanced] = useState(false);
     const [accessTransparency, setAccessTransparency] = useState<LocalAccessService | null>(null);
@@ -705,7 +707,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                 <input value={settingsSearch} onChange={(event) => setSettingsSearch(event.target.value)} placeholder={i18n.t('ui_copy.search_settings')} className="quiet-control h-9 w-full border border-app-border bg-app-surface-sunken ps-8 pe-2 text-sm text-app-text outline-none focus:border-app-accent" />
                             </div>
                             {([
-                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates storage portable migrate move relocate folder'], ['themes', Palette, 'Appearance colors themes']] as const],
+                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates storage portable migrate move relocate folder link device qr code phone mobile pc web'], ['themes', Palette, 'Appearance colors themes']] as const],
                                 [t('ui_copy.nav_security'), [['privacy', Database, 'Privacy local data settings sync portable migrate move backup restore'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
                                 [t('ui_copy.nav_connections'), [['sync', FolderSync, 'Folder sync local directories Telegram channels'], ['sharing', Link, 'Sharing links local server']] as const],
                                 [t('settings.tab_advanced'), [['advanced', Gauge, 'REST API proxy VPN WebDAV network integration Finder token port']] as const],
@@ -739,6 +741,30 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
 
                                 {activeTab === 'general' && (
                                     <GeneralSettingsTab>
+
+                            {/* Link Another Device Section */}
+                            <section className="settings-group">
+                                <div className="flex items-center justify-between gap-4 rounded-xl border border-app-accent/25 bg-app-accent/5 p-3.5">
+                                    <div className="flex items-center gap-3">
+                                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-app-accent/15 text-app-accent">
+                                            <Smartphone className="h-4 w-4" />
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-semibold text-app-text">Link Another Device</p>
+                                            <p className="text-xs text-app-text-secondary">
+                                                Sign in on your phone, PC, or web browser with a QR scan or Link Code — no API setup needed
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setDeviceLinkModalOpen(true)}
+                                        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-app-accent px-3.5 py-2 text-xs font-semibold text-white transition hover:opacity-95"
+                                    >
+                                        <QrCode className="h-3.5 w-3.5" /> Show QR / Code
+                                    </button>
+                                </div>
+                            </section>
 
                             {/* Transfers Section */}
                             <section className="settings-group">
@@ -2037,6 +2063,10 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                 </motion.div>
             )}
             {isOpen && accessTransparency && <AccessTransparencyDialog service={accessTransparency} onClose={() => setAccessTransparency(null)} />}
+            <DeviceLinkGeneratorModal
+                isOpen={deviceLinkModalOpen}
+                onClose={() => setDeviceLinkModalOpen(false)}
+            />
         </AnimatePresence>
     );
 }

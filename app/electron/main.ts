@@ -496,6 +496,20 @@ function registerIpcHandlers(): void {
 
 void app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
+  const allowedPermissions = new Set([
+    'media',
+    'clipboard-read',
+    'clipboard-sanitized-write',
+  ]);
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    if (!allowedPermissions.has(permission)) return false;
+    return /^(app:\/\/|https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?)/i.test(requestingOrigin || 'app://');
+  });
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const url = webContents?.getURL?.() ?? '';
+    const trusted = /^(app:\/\/|https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?)/i.test(url);
+    callback(trusted && allowedPermissions.has(permission));
+  });
   registerProtocols();
   registerIpcHandlers();
   await engine.initialize();

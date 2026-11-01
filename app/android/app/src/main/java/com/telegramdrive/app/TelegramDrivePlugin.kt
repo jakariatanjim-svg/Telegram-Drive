@@ -30,11 +30,14 @@ import androidx.core.content.FileProvider
 import androidx.fragment.app.FragmentActivity
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
+import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
@@ -58,7 +61,12 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-@CapacitorPlugin(name = "TelegramDriveNative")
+@CapacitorPlugin(
+    name = "TelegramDriveNative",
+    permissions = [
+        Permission(strings = [Manifest.permission.CAMERA], alias = "camera")
+    ]
+)
 class TelegramDrivePlugin : Plugin() {
 
     companion object {
@@ -1217,6 +1225,21 @@ class TelegramDrivePlugin : Plugin() {
                 call.reject("APK update failed: ${e.message}")
             }
         }
+    }
+
+    @PluginMethod
+    fun ensureCameraPermission(call: PluginCall) {
+        if (getPermissionState("camera") == PermissionState.GRANTED) {
+            call.resolve(JSObject().put("granted", true))
+        } else {
+            requestPermissionForAlias("camera", call, "cameraPermissionsCallback")
+        }
+    }
+
+    @PermissionCallback
+    private fun cameraPermissionsCallback(call: PluginCall) {
+        val granted = getPermissionState("camera") == PermissionState.GRANTED
+        call.resolve(JSObject().put("granted", granted))
     }
 
     fun emitDeepLink(url: String) {

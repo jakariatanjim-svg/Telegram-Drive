@@ -78,6 +78,7 @@ export interface TelegramDriveNativePlugin {
   openFileExternally(options: { path: string; mimeType?: string }): Promise<void>;
   openStreamPlayer(options: { streamUrl: string; title?: string; mimeType?: string }): Promise<void>;
   openExternalUrl(options: { url: string }): Promise<void>;
+  ensureCameraPermission(): Promise<{ granted: boolean }>;
   downloadAndInstallApk(options: { downloadUrl: string; fileName: string }): Promise<void>;
   addListener(
     eventName: 'apkDownloadProgress',

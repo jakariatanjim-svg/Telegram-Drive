@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { motion, AnimatePresence } from "framer-motion";
 import { Sun, Moon, ExternalLink, X } from "lucide-react";
@@ -8,6 +9,8 @@ import { load } from '@tauri-apps/plugin-store';
 import { toast } from 'sonner';
 import { useTheme } from '../../context/ThemeContext';
 import { open } from '@tauri-apps/plugin-shell';
+import { extractDeviceLinkCode } from '../../../shared/deviceLink';
+import { DeviceLinkReceiverModal } from './DeviceLinkReceiverModal';
 import {
     AuthCodeStep,
     AuthMethodStep,
@@ -67,9 +70,80 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
     const [qrPolling, setQrPolling] = useState(false);
     const [qrScanned, setQrScanned] = useState(false);
     const [importingPortable, setImportingPortable] = useState(false);
+    const [deviceLinkOpen, setDeviceLinkOpen] = useState(false);
+    const [deviceLinkMode, setDeviceLinkMode] = useState<'scan' | 'code'>('scan');
     const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const onLoginRef = useRef(onLogin);
     onLoginRef.current = onLogin;
+
+    useEffect(() => {
+        let cancelled = false;
+        let unlistenDeepLink: (() => void) | null = null;
+
+        const consumeIncomingLinkUrl = async (rawUrl: string) => {
+            const code = extractDeviceLinkCode(rawUrl);
+            if (!code || cancelled) return;
+            setImportingPortable(true);
+            setError(null);
+            try {
+                const res = await invoke<{ success: boolean; apiId: number; userId: string }>(
+                    'cmd_import_device_link',
+                    { code },
+                );
+                try {
+                    const store = await load('config.json');
+                    await store.set('api_id', String(res.apiId));
+                    await store.save();
+                } catch {
+                    // Already persisted by backend
+                }
+                if (!cancelled) {
+                    toast.success('Device linked and signed in!');
+                    onLoginRef.current();
+                }
+            } catch {
+                if (!cancelled) {
+                    setError('Invalid or expired device link. Generate a fresh QR or code on your logged-in device.');
+                }
+            } finally {
+                if (!cancelled) {
+                    setImportingPortable(false);
+                }
+            }
+        };
+
+        if (typeof window !== 'undefined') {
+            const hrefCode = extractDeviceLinkCode(window.location.href);
+            if (hrefCode) {
+                try {
+                    const cleanUrl = new URL(window.location.href);
+                    cleanUrl.searchParams.delete('code');
+                    cleanUrl.searchParams.delete('link');
+                    window.history.replaceState({}, '', cleanUrl.toString());
+                } catch {
+                    // Ignore URL cleanup errors
+                }
+                void consumeIncomingLinkUrl(hrefCode);
+            }
+        }
+
+        void onOpenUrl(urls => {
+            for (const url of urls) {
+                if (extractDeviceLinkCode(url)) {
+                    void consumeIncomingLinkUrl(url);
+                    break;
+                }
+            }
+        }).then(fn => {
+            if (cancelled) fn();
+            else unlistenDeepLink = fn;
+        });
+
+        return () => {
+            cancelled = true;
+            unlistenDeepLink?.();
+        };
+    }, []);
 
     const cancelQrFlow = useCallback(() => {
         setQrPolling(false);
@@ -581,6 +655,8 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                                     onSubmit={handleSetupSubmit}
                                     onShowHelp={() => setShowHelp(true)}
                                     onDevLogin={onLogin}
+                                    onOpenDeviceLinkScan={() => { setDeviceLinkMode('scan'); setDeviceLinkOpen(true); }}
+                                    onOpenDeviceLinkCode={() => { setDeviceLinkMode('code'); setDeviceLinkOpen(true); }}
                                     onImportPortableFile={isMobile ? undefined : () => { void handleImportPortableFile(); }}
                                     onImportPortableFolder={isMobile ? undefined : () => { void handleImportPortableFolder(); }}
                                 />
@@ -729,6 +805,13 @@ export function AuthWizard({ onLogin }: { onLogin: () => void }) {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            <DeviceLinkReceiverModal
+                isOpen={deviceLinkOpen}
+                initialMode={deviceLinkMode}
+                onClose={() => setDeviceLinkOpen(false)}
+                onLinked={onLogin}
+            />
 
         </div>
     );

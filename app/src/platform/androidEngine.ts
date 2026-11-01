@@ -1,4 +1,4 @@
-import { SentCode, User, type Message } from '@mtcute/core';
+import { MemoryStorage, SentCode, User, type Message } from '@mtcute/core';
 import { BaseTelegramClient, IdbStorage, TelegramClient, WebCryptoProvider, WebPlatform, WebSocketTransport } from '@mtcute/web';
 import mtcuteWasmUrl from '@mtcute/wasm/mtcute.wasm?url';
 import {
@@ -49,6 +49,7 @@ import {
 import { dispatchLocalEvent } from './eventBus';
 import { isAndroidNative, TelegramDriveNative, type MediaStreamRequestEvent } from './nativeBridge';
 import { runRobustQrSignIn } from '../../shared/qrAuthLoop';
+import { mintDeviceLinkBundle, unpackDeviceLinkToken } from '../../shared/deviceLink';
 
 const STATE_STORAGE_KEY = 'telegram_drive_android_state_v1';
 const STATE_BOOTSTRAP_KEY = 'telegram_drive_android_boot_v2';
@@ -1681,6 +1682,79 @@ class AndroidWebEngine {
 
       case 'cmd_workspace_account':
         return await this.getOwnerId();
+
+      case 'cmd_create_device_link': {
+        const apiId = Number(this.state.apiId || 0);
+        const apiHash = this.currentApiHash || (await this.loadSecret('api_hash')) || '';
+        if (!apiId || !apiHash) {
+          throw new Error('API_CREDENTIALS_MISSING');
+        }
+        const primaryClient = await this.ensureClient(apiId, apiHash);
+        const me = await primaryClient.getMe();
+        const password = typeof args.password === 'string' ? args.password : undefined;
+        const wasmModule = await this.getWasmModule();
+        const lang = navigator.language.split('-')[0] || 'en';
+
+        return await mintDeviceLinkBundle({
+          apiId,
+          apiHash,
+          userId: String(me.id),
+          primaryClient,
+          password,
+          createGuestClient: async () => {
+            const baseGuest = new BaseTelegramClient({
+              apiId,
+              apiHash,
+              storage: new MemoryStorage(),
+              updates: false,
+              crypto: new WebCryptoProvider({ wasmInput: wasmModule }),
+              transport: new WebSocketTransport(),
+              platform: new WebPlatform(),
+              initConnectionOptions: {
+                deviceModel: 'Telegram Drive Linked Device',
+                systemVersion: isAndroidNative() ? 'Android' : 'Web',
+                appVersion: '1.0',
+                systemLangCode: lang,
+                langCode: lang,
+              },
+            });
+            return new TelegramClient({
+              client: baseGuest,
+              disableUpdates: true,
+            });
+          },
+        });
+      }
+
+      case 'cmd_import_device_link': {
+        const rawCode = String(args.code ?? '');
+        const payload = unpackDeviceLinkToken(rawCode);
+
+        this.qrState.abort?.abort();
+        if (this.client) {
+          await this.client.destroy().catch(() => undefined);
+          this.client = null;
+          this.currentApiHash = null;
+        }
+
+        await this.storeSecret('api_hash', payload.apiHash);
+        this.state.apiId = payload.apiId;
+        this.saveState();
+
+        const client = await this.ensureClient(payload.apiId, payload.apiHash);
+        await client.importSession(payload.session, true);
+        const me = await client.getMe();
+        this.currentUserId = String(me.id);
+        this.state.lastUserId = this.currentUserId;
+        this.state.hasAuthorizedSession = true;
+        this.saveState();
+
+        return {
+          success: true,
+          apiId: payload.apiId,
+          userId: this.currentUserId,
+        };
+      }
 
       // ── Folders & Groups ───────────────────────────────────────────
       case 'cmd_scan_folders': {
