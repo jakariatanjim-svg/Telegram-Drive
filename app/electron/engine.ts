@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { app, shell } from 'electron';
 import {
+  MemoryStorage,
   SentCode,
   User,
   type Message,
@@ -58,6 +59,7 @@ import {
 } from './transcoder';
 import { checkGithubUpdate, downloadAndInstallWindowsUpdate } from './updater';
 import { runRobustQrSignIn } from '../shared/qrAuthLoop';
+import { mintDeviceLinkBundle, unpackDeviceLinkToken } from '../shared/deviceLink';
 import {
   ENCRYPTED_SPLIT_PART_SIZE_BYTES,
   SPLIT_PART_SIZE_BYTES,
@@ -4367,6 +4369,71 @@ export class DesktopEngine {
         this.currentUserId = this.db.lastUserId ?? null;
         this.vault.loadPersisted(this.db.vaultData);
         return result;
+      }
+
+      case 'cmd_create_device_link': {
+        const apiId = Number(this.db.apiId || 0);
+        const apiHash =
+          this.currentApiHash ||
+          readEncryptedSecretFile(this.apiHashFilePath) ||
+          '';
+        if (!apiId || !apiHash) {
+          throw new Error('API_CREDENTIALS_MISSING');
+        }
+        const primaryClient = await this.ensureClient(apiId, apiHash);
+        const me = await primaryClient.getMe();
+        const password = typeof args.password === 'string' ? args.password : undefined;
+
+        return await mintDeviceLinkBundle({
+          apiId,
+          apiHash,
+          userId: String(me.id),
+          primaryClient,
+          password,
+          createGuestClient: async () =>
+            await createNodeTelegramClient({
+              apiId,
+              apiHash,
+              storage: new MemoryStorage(),
+              getProxy: () => (this.db.proxy.enabled ? this.db.proxy : null),
+            }),
+        });
+      }
+
+      case 'cmd_import_device_link': {
+        const rawCode = String(args.code ?? '');
+        const payload = unpackDeviceLinkToken(rawCode);
+
+        this.qrState.abort?.abort();
+        if (this.client) {
+          await this.client.destroy().catch(() => undefined);
+          this.client = null;
+          this.currentApiHash = null;
+        }
+        if (this.mtprotoStorage) {
+          this.mtprotoStorage.clearDisk();
+          this.mtprotoStorage = null;
+        }
+        fs.rmSync(this.sessionFilePath, { force: true });
+        removeResilientBackupsSync(this.sessionFilePath);
+
+        writeEncryptedSecretFile(this.apiHashFilePath, payload.apiHash);
+        writeEncryptedSecretFile(this.sessionFilePath, payload.session);
+        this.db.apiId = payload.apiId;
+
+        const client = await this.ensureClient(payload.apiId, payload.apiHash);
+        await client.importSession(payload.session, true);
+        const me = await client.getMe();
+        this.currentUserId = String(me.id);
+        this.db.lastUserId = this.currentUserId;
+        await this.persistMtprotoSession();
+        this.flushDatabase();
+
+        return {
+          success: true,
+          apiId: payload.apiId,
+          userId: this.currentUserId,
+        };
       }
 
       default:

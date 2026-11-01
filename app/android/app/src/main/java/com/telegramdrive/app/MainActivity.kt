@@ -14,6 +14,9 @@ class MainActivity : BridgeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         registerPlugin(TelegramDrivePlugin::class.java)
         super.onCreate(savedInstanceState)
+        if (intent?.action == Intent.ACTION_VIEW) {
+            window?.decorView?.post { handleIncomingIntent(intent) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

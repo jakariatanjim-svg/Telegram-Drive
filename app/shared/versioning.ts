@@ -6,24 +6,52 @@ export const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_
 export interface ParsedVersion {
   major: number;
   minor: number;
+  patch: number | null;
   display: string;
 }
 
+/**
+ * Parses both 1-dot `vX.Y` (e.g. `1.0`, `4.4`) and 2-dot `vX.Y.Z` (e.g. `1.0.0`, `1.0.2`) versions.
+ */
 export function parseMajorMinor(raw: string | null | undefined): ParsedVersion | null {
   if (!raw) return null;
   const cleaned = raw.trim().replace(/^v/i, '').split('-')[0].trim();
   const parts = cleaned.split('.');
-  if (parts.length < 2) return null;
+  if (parts.length !== 2 && parts.length !== 3) return null;
+  if (!parts.every(p => /^\d+$/.test(p))) return null;
+
   const major = Number.parseInt(parts[0], 10);
   const minor = Number.parseInt(parts[1], 10);
-  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) {
+  const patch = parts.length === 3 ? Number.parseInt(parts[2], 10) : null;
+  if (
+    !Number.isInteger(major) ||
+    !Number.isInteger(minor) ||
+    major < 0 ||
+    minor < 0 ||
+    (patch !== null && (!Number.isInteger(patch) || patch < 0))
+  ) {
     return null;
   }
+
   return {
     major,
     minor,
-    display: `${major}.${minor}`,
+    patch,
+    display: patch !== null ? `${major}.${minor}.${patch}` : `${major}.${minor}`,
   };
+}
+
+export function resolveRuntimeAppVersion(pkgVersion: string): string {
+  try {
+    const envVer = (import.meta as unknown as { env?: Record<string, string | undefined> })?.env
+      ?.VITE_RELEASE_VERSION;
+    if (envVer && envVer.trim()) {
+      return envVer.trim();
+    }
+  } catch {
+    // Node / Electron main process context
+  }
+  return pkgVersion;
 }
 
 export function formatDisplayVersion(raw: string | null | undefined, fallback = '1.0'): string {
@@ -31,8 +59,8 @@ export function formatDisplayVersion(raw: string | null | undefined, fallback = 
 }
 
 /**
- * Numeric comparison of vX.Y versions:
- * returns > 0 if candidate > current, 0 if equal, < 0 if older.
+ * Numeric comparison across both `vX.Y` and `vX.Y.Z`:
+ * returns > 0 if candidate > current, 0 if equal (e.g. `4.5` == `4.5.0`), < 0 if older.
  */
 export function compareVersions(candidateRaw: string, currentRaw: string): number {
   const candidate = parseMajorMinor(candidateRaw);
@@ -41,7 +69,10 @@ export function compareVersions(candidateRaw: string, currentRaw: string): numbe
   if (candidate.major !== current.major) {
     return candidate.major - current.major;
   }
-  return candidate.minor - current.minor;
+  if (candidate.minor !== current.minor) {
+    return candidate.minor - current.minor;
+  }
+  return (candidate.patch ?? 0) - (current.patch ?? 0);
 }
 
 export interface GithubReleaseAsset {

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { version as pkgVersion } from '../../package.json';
-import { GITHUB_RELEASES_URL, compareVersions, formatDisplayVersion } from '../../shared/versioning';
+import { GITHUB_RELEASES_URL, compareVersions, formatDisplayVersion, resolveRuntimeAppVersion } from '../../shared/versioning';
 import type { UpdateInstallPhase } from '../services/updateReliability';
 
 export const RELEASES_URL = GITHUB_RELEASES_URL;
@@ -71,7 +71,7 @@ function writeCachedCheck(entry: CachedUpdateCheck): void {
 }
 
 export function useUpdateCheck() {
-  const currentVersion = formatDisplayVersion(pkgVersion, '1.0');
+  const currentVersion = formatDisplayVersion(resolveRuntimeAppVersion(pkgVersion), '1.0');
 
   const [state, setState] = useState<UpdateState>({
     checking: false,

@@ -1,5 +1,5 @@
 import { lazy, useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Folder, Download, Menu, LogOut, RefreshCw, UploadCloud, MoreVertical, Trash2, Pencil, Globe, Shield, Lock, ChevronDown, Share2, Link, Copy, Check, X, Loader2, Wifi, Activity, Zap, Eye, EyeOff, HelpCircle, Pause, Play, RotateCcw, CheckCircle2, Database } from 'lucide-react';
+import { Folder, Download, Menu, LogOut, RefreshCw, UploadCloud, MoreVertical, Trash2, Pencil, Globe, Shield, Lock, ChevronDown, Share2, Link, Copy, Check, X, Loader2, Wifi, Activity, Zap, Eye, EyeOff, HelpCircle, Pause, Play, RotateCcw, CheckCircle2, Database, QrCode, Smartphone } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -25,8 +25,8 @@ import { TelegramFile, TelegramFolder, ShareInfo, BandwidthStats } from '../../t
 import { useSettings } from '../../context/SettingsContext';
 import { useUpdates } from '../../context/UpdateContext';
 import { version as rawAppVersion } from '../../../package.json';
-import { formatDisplayVersion } from '../../../shared/versioning';
-const appVersion = formatDisplayVersion(rawAppVersion, '1.0');
+import { formatDisplayVersion, resolveRuntimeAppVersion } from '../../../shared/versioning';
+const appVersion = formatDisplayVersion(resolveRuntimeAppVersion(rawAppVersion), '1.0');
 import { LANGUAGES } from '../../i18n/languages';
 import { useTranslation } from 'react-i18next';
 import { useConfirm } from '../../context/ConfirmContext';
@@ -34,6 +34,7 @@ import { BandwidthWidget } from '../desktop/dashboard/BandwidthWidget';
 import type { OfflineCacheStatus } from '../../types';
 import { evaluateAndroidTransferPolicy, type AndroidTransferEnvironment } from '../../services/androidTransferPolicy';
 import { effectiveVideoUploadMode } from '../../services/videoUploadMode';
+import { DeviceLinkGeneratorModal } from '../shared/DeviceLinkGeneratorModal';
 import i18n from '../../i18n';
 
 const LazyHelpCenterDialog = lazy(() => import('../desktop/dashboard/HelpCenterDialog').then((module) => ({ default: module.HelpCenterDialog })));
@@ -75,6 +76,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
   const { confirm } = useConfirm();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<'files' | 'downloads' | 'settings'>('files');
+  const [deviceLinkModalOpen, setDeviceLinkModalOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const { isAndroid } = usePlatform();
   const { theme } = useTheme();
@@ -963,6 +965,27 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
 
         {activeTab === 'settings' && (
           <div className="space-y-4">
+            <div className="p-4 rounded-2xl bg-telegram-primary/10 border border-telegram-primary/30 flex items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-telegram-primary/20 text-telegram-primary">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-telegram-text">Link Another Device</p>
+                  <p className="text-[10px] leading-4 text-telegram-subtext">
+                    Sign in on your PC or another phone using QR scan or Link Code
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeviceLinkModalOpen(true)}
+                className="flex shrink-0 items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-telegram-primary text-white active:scale-95 transition-all duration-200"
+              >
+                <QrCode className="w-3.5 h-3.5" /> QR / Code
+              </button>
+            </div>
+
             <div className="p-4 rounded-2xl bg-telegram-hover/20 border border-telegram-border/30 space-y-4">
               <h3 className="text-sm font-bold text-telegram-primary tracking-wide uppercase text-[10px]">{t('common.preferences')}</h3>
               <div className="flex items-center justify-between py-2 border-b border-telegram-border/20">
@@ -1720,6 +1743,11 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
           </div>
         </div>
       )}
+
+      <DeviceLinkGeneratorModal
+        isOpen={deviceLinkModalOpen}
+        onClose={() => setDeviceLinkModalOpen(false)}
+      />
     </div>
   );
 }

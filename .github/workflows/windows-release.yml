@@ -1,15 +1,28 @@
+# DOES: Mints the next release version (1-dot vX.Y by default, or 2-dot vX.Y.Z when switched via override),
+#       builds the Windows Portable Install exe, creates the git tag on $GITHUB_SHA, and publishes the Latest GitHub Release.
+# DOES NOT: Commit version bumps to the repository, overwrite existing tags/releases, or build Android assets.
+
 name: Windows — Release (Primary)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional version override (e.g. 1.0, 1.4, 2.0). Leave empty for automatic increment."
+        description: "Optional version override (e.g. 1.2, 4.2, or 1.0.0 to switch to X.Y.Z). Leave empty for auto-increment."
         required: false
         type: string
+      confirm:
+        description: "Confirm running release from a non-default branch"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-windows-primary
+  cancel-in-progress: false
 
 jobs:
   release-windows:
@@ -19,6 +32,18 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
     steps:
+      - name: Check release branch guard
+        shell: pwsh
+        env:
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CONFIRMED: ${{ inputs.confirm }}
+        run: |
+          if ($env:CURRENT_BRANCH -ne $env:DEFAULT_BRANCH -and $env:CONFIRMED -ne 'true') {
+            Write-Host "::error::Release runs on non-default branch '$($env:CURRENT_BRANCH)' require checking the 'confirm' input box (or run from '$($env:DEFAULT_BRANCH)')."
+            exit 1
+          }
+
       - name: Checkout repository with tags
         uses: actions/checkout@v4
         with:
@@ -28,48 +53,111 @@ jobs:
         id: ver
         shell: pwsh
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           git fetch --tags --force
           $override = "$env:INPUT_VERSION".Trim()
 
-          if ($override.Length -gt 0) {
-            $clean = $override -replace '^[vV]', ''
-            if ($clean -notmatch '^\d+\.[0-9]$') {
-              throw "Invalid version '$override'. Must match X.Y where minor is 0–9 (e.g. 1.0, 1.4, 2.0)."
-            }
-            $nextVersion = $clean
-          } else {
-            $tags = git tag --list "v*" | Where-Object { $_ -match '^v(\d+)\.([0-9])$' }
-            if (-not $tags -or $tags.Count -eq 0) {
-              $nextVersion = "1.0"
-            } else {
-              $parsed = foreach ($t in $tags) {
-                if ($t -match '^v(\d+)\.([0-9])$') {
-                  [PSCustomObject]@{
-                    Major = [int]$Matches[1]
-                    Minor = [int]$Matches[2]
-                  }
-                }
+          # Supports 1-dot X.Y (default) and 2-dot X.Y.Z (when overridden); non-major digits run 0-9.
+          function Parse-ReleaseVersion([string]$raw) {
+            if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+            $c = $raw.Trim() -replace '^[vV]', ''
+            if ($c -match '^(\d+)$') {
+              return [PSCustomObject]@{
+                Major = [int]$Matches[1]; Minor = 0; Patch = -1; SortPatch = 0
+                Segments = 2; Display = "$($Matches[1]).0"
               }
-              $latest = $parsed | Sort-Object -Property Major, Minor | Select-Object -Last 1
-              if ($latest.Minor -ge 9) {
-                $nextVersion = "$($latest.Major + 1).0"
+            }
+            if ($c -match '^(\d+)\.([0-9])$') {
+              return [PSCustomObject]@{
+                Major = [int]$Matches[1]; Minor = [int]$Matches[2]; Patch = -1; SortPatch = 0
+                Segments = 2; Display = "$($Matches[1]).$($Matches[2])"
+              }
+            }
+            if ($c -match '^(\d+)\.([0-9])\.([0-9])$') {
+              return [PSCustomObject]@{
+                Major = [int]$Matches[1]; Minor = [int]$Matches[2]; Patch = [int]$Matches[3]; SortPatch = [int]$Matches[3]
+                Segments = 3; Display = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+              }
+            }
+            return $null
+          }
+
+          function Step-ReleaseVersion($v) {
+            if ($v.Segments -eq 3) {
+              if ($v.Patch -lt 9) {
+                return Parse-ReleaseVersion "$($v.Major).$($v.Minor).$($v.Patch + 1)"
+              } elseif ($v.Minor -lt 9) {
+                return Parse-ReleaseVersion "$($v.Major).$($v.Minor + 1).0"
               } else {
-                $nextVersion = "$($latest.Major).$($latest.Minor + 1)"
+                return Parse-ReleaseVersion "$($v.Major + 1).0.0"
+              }
+            } else {
+              if ($v.Minor -lt 9) {
+                return Parse-ReleaseVersion "$($v.Major).$($v.Minor + 1)"
+              } else {
+                return Parse-ReleaseVersion "$($v.Major + 1).0"
               }
             }
           }
 
+          $allTags = @(git tag --list "v*")
+          $validTagObjs = @()
+          foreach ($t in $allTags) {
+            $p = Parse-ReleaseVersion $t
+            if ($null -ne $p -and "v$($p.Display)" -eq $t) {
+              $validTagObjs += $p
+            }
+          }
+          $highestExisting = $validTagObjs | Sort-Object -Property Major, Minor, SortPatch, Segments | Select-Object -Last 1
+
+          if ($override.Length -gt 0) {
+            $nextObj = Parse-ReleaseVersion $override
+            if ($null -eq $nextObj) {
+              Write-Host "::error::Invalid version override '$override'. Use X.Y (e.g. 1.2, 4.2) or 2-dot X.Y.Z (e.g. 1.0.0), with non-first digits 0-9."
+              exit 1
+            }
+            if ($null -ne $highestExisting) {
+              $isLower = ($nextObj.Major -lt $highestExisting.Major) -or
+                ($nextObj.Major -eq $highestExisting.Major -and $nextObj.Minor -lt $highestExisting.Minor) -or
+                ($nextObj.Major -eq $highestExisting.Major -and $nextObj.Minor -eq $highestExisting.Minor -and $nextObj.SortPatch -lt $highestExisting.SortPatch)
+              if ($isLower) {
+                Write-Host "::warning::Version override v$($nextObj.Display) is lower than the highest existing tag v$($highestExisting.Display). Using v$($nextObj.Display) as the new baseline."
+              }
+            }
+          } else {
+            # Use the Latest GitHub Release as the active format & baseline (falls back to highest valid tag, or 1.0 on first run)
+            $latestRelTag = ""
+            try { $latestRelTag = (gh release view --json tagName -q .tagName 2>$null) } catch {}
+            $baseline = Parse-ReleaseVersion "$latestRelTag"
+            if ($null -eq $baseline) {
+              $baseline = $highestExisting
+            }
+            if ($null -eq $baseline) {
+              $nextObj = Parse-ReleaseVersion "1.0"
+            } else {
+              $nextObj = Step-ReleaseVersion $baseline
+              while ($allTags -contains "v$($nextObj.Display)") {
+                $nextObj = Step-ReleaseVersion $nextObj
+              }
+            }
+          }
+
+          $nextVersion = $nextObj.Display
+          $semverVersion = if ($nextObj.Segments -eq 2) { "$nextVersion.0" } else { $nextVersion }
           $tag = "v$nextVersion"
-          $existingTag = git tag --list $tag
-          if ($existingTag) {
-            throw "Release tag '$tag' already exists."
+
+          if ($allTags -contains $tag) {
+            Write-Host "::error::Release tag '$tag' already exists. Leave override empty for automatic increment or enter an unused version."
+            exit 1
           }
 
           "version=$nextVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "semver=$semverVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Target Release: Telegram-Drive — $tag"
+          Write-Host "Target Release: $($env:REPO_NAME) — $tag"
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
@@ -86,9 +174,10 @@ jobs:
         working-directory: app
         shell: pwsh
         env:
-          TARGET_VERSION: ${{ steps.ver.outputs.version }}
+          TARGET_SEMVER: ${{ steps.ver.outputs.semver }}
         run: |
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_VERSION+'.0';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+          # electron-builder requires 3-part SemVer in package.json for Windows PE metadata
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.version=process.env.TARGET_SEMVER;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
 
       - name: Validate locales
         working-directory: app
@@ -98,21 +187,45 @@ jobs:
         working-directory: app
         env:
           RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          VITE_RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: npm run dist:win
 
       - name: Publish clean GitHub Release
+        id: pub
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
           REL_VERSION: ${{ steps.ver.outputs.version }}
           REL_TAG: ${{ steps.ver.outputs.tag }}
         run: |
-          $assetPath = "app/release/Telegram-Drive-$($env:REL_VERSION)-portable-setup.exe"
+          $assetPath = "app/release/$($env:REPO_NAME)-$($env:REL_VERSION)-portable-setup.exe"
           if (-not (Test-Path -LiteralPath $assetPath)) {
-            throw "Built installer not found at $assetPath"
+            Write-Host "::error::Built installer not found at '$assetPath'. Check electron-builder artifactName in app/package.json."
+            exit 1
           }
-          $title = "Telegram-Drive — $($env:REL_TAG)"
-          gh release create $env:REL_TAG $assetPath `
+          $title = "$($env:REPO_NAME) — $($env:REL_TAG)"
+          $relUrl = gh release create $env:REL_TAG $assetPath `
             --title $title `
             --generate-notes `
+            --latest `
             --target "${{ github.sha }}"
+          "release_url=$relUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Write run summary
+        shell: pwsh
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+          REL_VERSION: ${{ steps.ver.outputs.version }}
+          REL_TAG: ${{ steps.ver.outputs.tag }}
+          REL_URL: ${{ steps.pub.outputs.release_url }}
+        run: |
+          @(
+            "### Windows — Release (Primary)",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Branch | ``$($env:BRANCH_NAME)`` |",
+            "| Version | ``$($env:REL_VERSION)`` |",
+            "| Tag | ``$($env:REL_TAG)`` |",
+            "| Release | $($env:REL_URL) |"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

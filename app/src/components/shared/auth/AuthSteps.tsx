@@ -1,6 +1,6 @@
 import type { FormEvent } from 'react';
 import { motion } from 'framer-motion';
-import { ArrowRight, CheckCircle2, ExternalLink, FolderOpen, HelpCircle, Key, Lock, Phone, QrCode, Upload } from 'lucide-react';
+import { ArrowRight, Camera, CheckCircle2, ExternalLink, FolderOpen, HelpCircle, Key, KeyRound, Lock, Phone, QrCode, Smartphone, Upload } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../../i18n';
@@ -41,6 +41,8 @@ interface AuthSetupStepProps {
   onSubmit: (event: FormEvent) => void;
   onShowHelp: () => void;
   onDevLogin: () => void;
+  onOpenDeviceLinkScan?: () => void;
+  onOpenDeviceLinkCode?: () => void;
   onImportPortableFile?: () => void;
   onImportPortableFolder?: () => void;
 }
@@ -55,12 +57,53 @@ export function AuthSetupStep({
   onSubmit,
   onShowHelp,
   onDevLogin,
+  onOpenDeviceLinkScan,
+  onOpenDeviceLinkCode,
   onImportPortableFile,
   onImportPortableFolder,
 }: AuthSetupStepProps) {
   const { t } = useTranslation();
   return (
     <motion.form key="setup" initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -20, opacity: 0 }} onSubmit={onSubmit} className="space-y-4">
+      {(onOpenDeviceLinkScan || onOpenDeviceLinkCode) && (
+        <div className="rounded-container border border-app-accent/30 bg-app-accent/8 p-3.5 space-y-2.5">
+          <div className="flex items-start gap-2.5">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-app-accent/15 text-app-accent">
+              <Smartphone className="h-4 w-4" />
+            </div>
+            <div className="text-start">
+              <h2 className="text-xs font-semibold text-app-text">
+                Already logged in on another device?
+              </h2>
+              <p className="mt-0.5 text-[11px] leading-4 text-app-text-secondary">
+                Sign in right away using QR scan or Link Code from your phone or PC.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {onOpenDeviceLinkScan && (
+              <button
+                type="button"
+                disabled={importingPortable}
+                onClick={onOpenDeviceLinkScan}
+                className="quiet-control auth-secondary-action w-full border-app-accent/30 bg-app-surface text-xs font-semibold text-app-text hover:border-app-accent/60 disabled:opacity-50"
+              >
+                <Camera className="h-3.5 w-3.5 text-app-accent" /> Scan QR
+              </button>
+            )}
+            {onOpenDeviceLinkCode && (
+              <button
+                type="button"
+                disabled={importingPortable}
+                onClick={onOpenDeviceLinkCode}
+                className="quiet-control auth-secondary-action w-full border-app-accent/30 bg-app-surface text-xs font-semibold text-app-text hover:border-app-accent/60 disabled:opacity-50"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-app-accent" /> Enter Code
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <div className="rounded-container border border-app-accent/20 bg-app-accent/5 p-4 text-center">
         <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-app-selected text-app-accent"><QrCode className="h-5 w-5" /></div>
         <h2 className="mt-3 text-sm font-semibold text-app-text">{t('auth_copy.qr_title')}</h2>
