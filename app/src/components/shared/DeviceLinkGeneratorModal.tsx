@@ -123,7 +123,7 @@ export function DeviceLinkGeneratorModal({ isOpen, onClose }: DeviceLinkGenerato
             <div>
               <h2 className="text-sm font-semibold text-app-text">Link Another Device</h2>
               <p className="text-xs text-app-text-secondary">
-                Sign in on your phone, PC, or web browser in one step
+                Sign in on your phone or PC in one step
               </p>
             </div>
           </div>

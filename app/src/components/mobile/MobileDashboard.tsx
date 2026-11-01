@@ -973,7 +973,7 @@ export default function MobileDashboard({ onLogout }: { onLogout?: () => void })
                 <div>
                   <p className="text-xs font-semibold text-telegram-text">Link Another Device</p>
                   <p className="text-[10px] leading-4 text-telegram-subtext">
-                    Sign in on your PC, another phone, or web browser using QR or Link Code
+                    Sign in on your PC or another phone using QR scan or Link Code
                   </p>
                 </div>
               </div>

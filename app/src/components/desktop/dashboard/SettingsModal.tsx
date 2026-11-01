@@ -707,7 +707,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                 <input value={settingsSearch} onChange={(event) => setSettingsSearch(event.target.value)} placeholder={i18n.t('ui_copy.search_settings')} className="quiet-control h-9 w-full border border-app-border bg-app-surface-sunken ps-8 pe-2 text-sm text-app-text outline-none focus:border-app-accent" />
                             </div>
                             {([
-                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates storage portable migrate move relocate folder link device qr code phone mobile pc web'], ['themes', Palette, 'Appearance colors themes']] as const],
+                                [t('ui_copy.nav_essentials'), [['general', Globe, 'General transfers language updates storage portable migrate move relocate folder link device qr code phone mobile pc'], ['themes', Palette, 'Appearance colors themes']] as const],
                                 [t('ui_copy.nav_security'), [['privacy', Database, 'Privacy local data settings sync portable migrate move backup restore'], ['encryption', Shield, 'Encryption vault security auto lock']] as const],
                                 [t('ui_copy.nav_connections'), [['sync', FolderSync, 'Folder sync local directories Telegram channels'], ['sharing', Link, 'Sharing links local server']] as const],
                                 [t('settings.tab_advanced'), [['advanced', Gauge, 'REST API proxy VPN WebDAV network integration Finder token port']] as const],
@@ -752,7 +752,7 @@ function OwnedSettingsModal({ ownerId, isOpen, onClose, initialTab = 'general' }
                                         <div>
                                             <p className="text-sm font-semibold text-app-text">Link Another Device</p>
                                             <p className="text-xs text-app-text-secondary">
-                                                Sign in on your phone, PC, or web browser with a QR scan or Link Code — no API setup needed
+                                                Sign in on your phone or another PC with a QR scan or Link Code — no API setup needed
                                             </p>
                                         </div>
                                     </div>

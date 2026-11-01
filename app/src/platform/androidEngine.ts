@@ -1712,7 +1712,7 @@ class AndroidWebEngine {
               platform: new WebPlatform(),
               initConnectionOptions: {
                 deviceModel: 'Telegram Drive Linked Device',
-                systemVersion: isAndroidNative() ? 'Android' : 'Web',
+                systemVersion: 'Android',
                 appVersion: '1.0',
                 systemLangCode: lang,
                 langCode: lang,

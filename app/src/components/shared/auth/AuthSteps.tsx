@@ -76,7 +76,7 @@ export function AuthSetupStep({
                 Already logged in on another device?
               </h2>
               <p className="mt-0.5 text-[11px] leading-4 text-app-text-secondary">
-                Sign in right away using QR scan or Link Code from your phone, PC, or web browser.
+                Sign in right away using QR scan or Link Code from your phone or PC.
               </p>
             </div>
           </div>
