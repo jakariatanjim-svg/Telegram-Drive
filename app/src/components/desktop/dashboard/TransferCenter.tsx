@@ -123,12 +123,14 @@ export function TransferCenter({
                     <UploadCloud className="h-4 w-4 shrink-0 text-app-accent" />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs text-app-text" title={item.url || item.path}>{(item.url || item.path).split(/[\\/]/).pop()}</p>
-                      <StatusLabel status={item.status} />
+                      {item.status === 'verifying'
+                        ? <span className="text-[10px] font-medium text-app-accent">Finalizing upload…</span>
+                        : <StatusLabel status={item.status} />}
                     </div>
                     {(item.status === 'pending' || item.status === 'paused' || item.status === 'uploading' || item.status === 'downloading' || item.status === 'encrypting' || item.status === 'verifying') && <button type="button" onClick={() => onCancelUpload(item.id)} className="quiet-control p-1.5 text-app-text-secondary hover:text-app-danger" aria-label={`Cancel upload ${item.url || item.path}`} title={i18n.t("common.cancel")}><X className="h-3.5 w-3.5" aria-hidden="true" /></button>}
                     {(item.status === 'error' || item.status === 'cancelled' || item.status === 'waiting_for_unlock') && <button type="button" onClick={() => onRetryUpload(item.id)} className="quiet-control p-1.5 text-app-text-secondary hover:text-app-accent" aria-label={i18n.t('common.action_name', { action: item.status === 'waiting_for_unlock' ? i18n.t('protection_labels.provide_credentials') : i18n.t('common.retry'), name: item.url || item.path })} title={item.status === 'waiting_for_unlock' ? i18n.t('protection_labels.provide_credentials') : i18n.t("common.retry")}><RotateCcw className="h-3.5 w-3.5" aria-hidden="true" /></button>}
                   </div>
-                  {(item.status === 'uploading' || item.status === 'downloading') && <TransferProgress value={item.progress} />}
+                  {(item.status === 'uploading' || item.status === 'downloading' || item.status === 'verifying') && <TransferProgress value={item.progress} />}
                   {item.error && <p className="mt-1 truncate text-[10px] text-app-danger">{item.error}</p>}
                 </div>
               ))}

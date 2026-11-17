@@ -103,7 +103,12 @@ export function ExternalDropBlocker({
                     setIsDragging(false);
                     setDetectedCount(0);
                     const paths = event.payload.paths.filter(path => path.trim().length > 0);
-                    if (paths.length === 0) return;
+                    if (paths.length === 0) {
+                        // Some OS drag sources don't expose a readable native path.
+                        // Don't silently discard the gesture: offer the file picker.
+                        setShowFallback(true);
+                        return;
+                    }
 
                     // Guard against duplicate native delivery during webview/window
                     // transitions without suppressing a later intentional re-drop.
@@ -167,10 +172,12 @@ export function ExternalDropBlocker({
                                 </div>
                                 <div>
                                     <h3 className="mb-2 text-lg font-semibold text-telegram-text">
-                                        {t('files.drop_not_available')}
+                                        {isTauri() ? 'Could not read dropped file' : t('files.drop_not_available')}
                                     </h3>
                                     <p className="text-sm text-telegram-subtext">
-                                        {t('files.drop_browser_help')}
+                                        {isTauri()
+                                            ? 'This dropped item has no readable file path. Choose it using the upload dialog instead.'
+                                            : t('files.drop_browser_help')}
                                     </p>
                                 </div>
                                 <div className="flex gap-3">

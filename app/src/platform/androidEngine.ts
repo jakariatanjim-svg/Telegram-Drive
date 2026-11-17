@@ -50,14 +50,15 @@ import { dispatchLocalEvent } from './eventBus';
 import { isAndroidNative, TelegramDriveNative, type MediaStreamRequestEvent } from './nativeBridge';
 import { runRobustQrSignIn } from '../../shared/qrAuthLoop';
 import { mintDeviceLinkBundle, unpackDeviceLinkToken } from '../../shared/deviceLink';
+import { withUploadLiveness, withUploadFinalizationDeadline } from '../../shared/uploadLiveness';
 
 const STATE_STORAGE_KEY = 'telegram_drive_android_state_v1';
 const STATE_BOOTSTRAP_KEY = 'telegram_drive_android_boot_v2';
 const ANDROID_IDB_NAME = 'telegram-drive-android-state-db';
 const ANDROID_IDB_STORE = 'kv';
 const ANDROID_IDB_STATE_KEY = 'state_v2';
-const ANDROID_ENCRYPTED_SPLIT_PART_LOW_RAM = 64 * 1024 * 1024; // 64 MiB on <3.2 GiB RAM phones
-const ANDROID_ENCRYPTED_SPLIT_PART_NORMAL = 128 * 1024 * 1024; // 128 MiB on 4 GB+ RAM phones
+const ANDROID_ENCRYPTED_SPLIT_PART_LOW_RAM = 32 * 1024 * 1024; // 32 MiB on <3.2 GiB RAM phones
+const ANDROID_ENCRYPTED_SPLIT_PART_NORMAL = 64 * 1024 * 1024; // 64 MiB on 4 GB+ RAM phones
 
 function openAndroidStateDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -126,7 +127,7 @@ function isTransientAndroidError(err: unknown): boolean {
   if (/ABORT|CANCEL|FILE_UNREADABLE|VAULT_LOCKED|PASSPHRASE|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED|MESSAGE_NOT_FOUND|MEDIA_NOT_FOUND|ENOSPC|No space left/i.test(text)) {
     return false;
   }
-  return /TIMEOUT|TIMED_OUT|NETWORK|DISCONNECT|SOCKET|FETCH|RESET|ECONN|EOF|CONNECTION|FLOOD_WAIT|502|503|504|WebSocket|Failed to fetch/i.test(
+  return /UPLOAD_STALLED|TIMEOUT|TIMED_OUT|NETWORK|DISCONNECT|SOCKET|FETCH|RESET|ECONN|EOF|CONNECTION|FLOOD_WAIT|502|503|504|WebSocket|Failed to fetch/i.test(
     text,
   ) || (typeof navigator !== 'undefined' && navigator.onLine === false);
 }
@@ -849,10 +850,14 @@ class AndroidWebEngine {
           length: toRead,
         });
         if (!res.bytesRead || !res.data) {
-          controller.close();
+          controller.error(new Error('FILE_UNREADABLE: Source ended before upload was complete.'));
           return;
         }
         const bytes = base64ToUint8(res.data);
+        if (bytes.byteLength === 0) {
+          controller.error(new Error('FILE_UNREADABLE: Empty source chunk.'));
+          return;
+        }
         cursor += bytes.byteLength;
         controller.enqueue(bytes);
         if (cursor >= sliceLength) {
@@ -884,12 +889,13 @@ class AndroidWebEngine {
         offset: sliceOffset + cursor,
         length: toRead,
       });
-      if (!res.bytesRead || !res.data) break;
+      if (!res.bytesRead || !res.data) throw new Error('FILE_UNREADABLE: Source ended before upload was complete.');
       const chunk = base64ToUint8(res.data);
+      if (chunk.byteLength === 0) throw new Error('FILE_UNREADABLE: Empty source chunk.');
       out.set(chunk.subarray(0, Math.min(chunk.byteLength, sliceLength - cursor)), cursor);
       cursor += chunk.byteLength;
     }
-    return cursor === sliceLength ? out : out.subarray(0, cursor);
+    return out;
   }
 
   private async performAndroidSplitUpload(params: {
@@ -950,8 +956,11 @@ class AndroidWebEngine {
       const doneIds = Object.values(checkpoint.completedParts).map(p => p.messageId);
       if (doneIds.length > 0) {
         try {
-          const msgs = await client.getMessages(peer, doneIds.slice(0, 100));
-          const existingSet = new Set(msgs.filter((m): m is Message => Boolean(m)).map(m => m.id));
+          const existingSet = new Set<number>();
+          for (let offset = 0; offset < doneIds.length; offset += 100) {
+            const msgs = await client.getMessages(peer, doneIds.slice(offset, offset + 100));
+            for (const msg of msgs) if (msg?.media) existingSet.add(msg.id);
+          }
           for (const [idxStr, meta] of Object.entries(checkpoint.completedParts)) {
             if (!existingSet.has(meta.messageId)) {
               delete checkpoint.completedParts[Number(idxStr)];
@@ -995,82 +1004,78 @@ class AndroidWebEngine {
         .slice(0, plan.index)
         .reduce((acc, p) => acc + p.size, 0);
 
-      await this.runWithTransientRetry(transferId, abort.signal, async () => {
-        const partName = buildSplitPartFileName(groupId, plan.index, partCount);
-        let uploadedPartSize = plan.size;
+      const partName = buildSplitPartFileName(groupId, plan.index, partCount);
+      let uploadedPartSize = plan.size;
 
-        let uploadInput: Blob | Uint8Array | ReadableStream<Uint8Array>;
-        if (!isEncrypted) {
-          uploadInput = browserFile
-            ? browserFile.slice(plan.offset, plan.offset + plan.size)
-            : this.createNativeChunkReadableStream(
-                rawPath,
-                plan.offset,
-                plan.size,
-                abort.signal,
-              );
-        } else {
-          const plainSlice = await this.readSliceIntoUint8(
-            browserFile,
-            rawPath,
-            plan.offset,
-            plan.size,
-            abort.signal,
+      let encryptedInput: Uint8Array | undefined;
+      if (isEncrypted) {
+        const plainSlice = await this.readSliceIntoUint8(
+          browserFile,
+          rawPath,
+          plan.offset,
+          plan.size,
+          abort.signal,
+        );
+        const enc = this.vault.encryptBuffer(plainSlice, {
+          mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
+          passphrase: resolvedPassphrase,
+          originalName: `${originalName}.part${plan.index + 1}`,
+          originalMime: 'application/octet-stream',
+          protectMetadata: true,
+        });
+        vaultId = enc.vaultId;
+        uploadedPartSize = enc.ciphertext.byteLength;
+        encryptedInput = enc.ciphertext;
+      }
+
+      const uploaded = await this.runWithTransientRetry(transferId, abort.signal, () =>
+        withUploadLiveness(abort.signal, (signal, activity) => client.uploadFile({
+        // Native streams are single-use; recreate them for each retry.
+        file: (encryptedInput ?? (browserFile
+          ? browserFile.slice(plan.offset, plan.offset + plan.size)
+          : this.createNativeChunkReadableStream(rawPath, plan.offset, plan.size, signal)))
+          as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
+        fileName: partName,
+        fileSize: uploadedPartSize,
+        fileMime: 'application/octet-stream',
+        partSize: 512,
+        abortSignal: signal,
+        progressCallback: (done, tot) => {
+          if (!activity()) return;
+          const frac = tot > 0 ? Math.min(1, done / tot) : 0;
+          const overallDone = Math.min(
+            originalSize,
+            completedPlainBefore + Math.round(frac * plan.size),
           );
-          const enc = this.vault.encryptBuffer(plainSlice, {
-            mode: protectionMode === 'passphrase' ? 'passphrase' : 'vault',
-            passphrase: resolvedPassphrase,
-            originalName: `${originalName}.part${plan.index + 1}`,
-            originalMime: 'application/octet-stream',
-            protectMetadata: true,
+          const speed = Math.round(overallDone / Math.max(0.1, (Date.now() - t0) / 1000));
+          dispatchLocalEvent('upload-progress', {
+            id: transferId,
+            progress: Math.min(99, Math.round((overallDone / originalSize) * 100)),
+            uploaded_bytes: overallDone,
+            total_bytes: originalSize,
+            speed_bytes_per_sec: speed,
+            part_index: plan.index + 1,
+            part_count: partCount,
           });
-          vaultId = enc.vaultId;
-          uploadedPartSize = enc.ciphertext.byteLength;
-          uploadInput = enc.ciphertext;
-        }
+        },
+      })));
 
-        const uploaded = await client.uploadFile({
-          file: uploadInput as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
-          fileName: partName,
-          fileSize: uploadedPartSize,
-          fileMime: 'application/octet-stream',
-          partSize: 512,
-          abortSignal: abort.signal,
-          progressCallback: (done, tot) => {
-            const frac = tot > 0 ? Math.min(1, done / tot) : 0;
-            const overallDone = Math.min(
-              originalSize,
-              completedPlainBefore + Math.round(frac * plan.size),
-            );
-            const speed = Math.round(overallDone / Math.max(0.1, (Date.now() - t0) / 1000));
-            dispatchLocalEvent('upload-progress', {
-              id: transferId,
-              progress: Math.min(99, Math.round((overallDone / originalSize) * 100)),
-              uploaded_bytes: overallDone,
-              total_bytes: originalSize,
-              speed_bytes_per_sec: speed,
-              part_index: plan.index + 1,
-              part_count: partCount,
-            });
-          },
-        });
+      if (abort.signal.aborted) throw new Error('ABORTED');
+      const partCaption = buildSplitPartCaption(groupId, plan.index, partCount, uploadedPartSize);
+      const sentPart = await withUploadFinalizationDeadline(() => client.sendMedia(peer, {
+        type: 'document',
+        file: uploaded,
+        fileName: partName,
+        caption: partCaption,
+      }));
 
-        const partCaption = buildSplitPartCaption(groupId, plan.index, partCount, uploadedPartSize);
-        const sentPart = await client.sendMedia(peer, {
-          type: 'document',
-          file: uploaded,
-          fileName: partName,
-          caption: partCaption,
-        });
-
-        this.state.bandwidth.uploaded += uploadedPartSize;
-        checkpoint.completedParts[plan.index] = {
-          messageId: sentPart.id,
-          size: uploadedPartSize,
-        };
-        checkpoint.updatedAt = Date.now();
-        this.saveState();
-      });
+      this.state.bandwidth.uploaded += uploadedPartSize;
+      checkpoint.completedParts[plan.index] = {
+        messageId: sentPart.id,
+        size: uploadedPartSize,
+      };
+      checkpoint.updatedAt = Date.now();
+      this.saveState();
     }
 
     const orderedParts: SplitPartDescriptor[] = partPlans.map(p => {
@@ -1103,21 +1108,21 @@ class AndroidWebEngine {
     const manifestName = buildSplitManifestFileName(groupId);
     const manifestCaption = buildSplitManifestCaption(manifestPayload);
 
-    const sentManifest = await this.runWithTransientRetry(transferId, abort.signal, async () => {
-      const uploadedManifest = await client.uploadFile({
+    const uploadedManifest = await this.runWithTransientRetry(transferId, abort.signal, () =>
+      withUploadLiveness(abort.signal, signal => client.uploadFile({
         file: manifestBytes,
         fileName: manifestName,
         fileSize: manifestBytes.byteLength,
         fileMime: 'application/json',
-        abortSignal: abort.signal,
-      });
-      return await client.sendMedia(peer, {
+        abortSignal: signal,
+      })));
+    if (abort.signal.aborted) throw new Error('ABORTED');
+    const sentManifest = await withUploadFinalizationDeadline(() => client.sendMedia(peer, {
         type: 'document',
         file: uploadedManifest,
         fileName: manifestName,
         caption: manifestCaption,
-      });
-    });
+      }));
 
     const finalKey = fileCompositeKey(folderId, sentManifest.id);
     if (!this.state.splitManifests) this.state.splitManifests = {};
@@ -2387,20 +2392,18 @@ class AndroidWebEngine {
 
           const client = await this.ensureClient();
           const t0 = Date.now();
-          const sent = await this.runWithTransientRetry(transferId, abort.signal, async () => {
-            const uploadSource: File | Uint8Array | ReadableStream<Uint8Array> = encryptedPayload
-              ? encryptedPayload
-              : browserFile
+          const uploaded = await this.runWithTransientRetry(transferId, abort.signal, () =>
+            withUploadLiveness(abort.signal, (signal, activity) => client.uploadFile({
+              file: (encryptedPayload ?? (browserFile
                 ? browserFile
-                : this.createNativeChunkReadableStream(rawPath, 0, originalSize, abort.signal);
-
-            const uploaded = await client.uploadFile({
-              file: uploadSource as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
+                : this.createNativeChunkReadableStream(rawPath, 0, originalSize, signal)))
+                as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
               fileName: uploadName,
               fileSize: uploadByteLength,
               fileMime: isEncrypted ? 'application/octet-stream' : guessMimeType(originalName),
-              abortSignal: abort.signal,
+              abortSignal: signal,
               progressCallback: (done, tot) => {
+                if (!activity()) return;
                 const speed = Math.round(done / Math.max(0.1, (Date.now() - t0) / 1000));
                 dispatchLocalEvent('upload-progress', {
                   id: transferId,
@@ -2410,15 +2413,15 @@ class AndroidWebEngine {
                   speed_bytes_per_sec: speed,
                 });
               },
-            });
+            })));
 
-            return await client.sendMedia(folderIdToPeer(folderId), {
+          if (abort.signal.aborted) throw new Error('ABORTED');
+          const sent = await withUploadFinalizationDeadline(() => client.sendMedia(folderIdToPeer(folderId), {
               type: 'document',
               file: uploaded,
               fileName: uploadName,
               caption: isEncrypted ? '' : originalName,
-            });
-          });
+            }));
 
           this.state.bandwidth.uploaded += uploadByteLength;
 
