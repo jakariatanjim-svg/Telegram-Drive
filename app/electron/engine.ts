@@ -1397,7 +1397,7 @@ export class DesktopEngine {
     const isEncrypted =
       params.protectionMode === 'vault' || params.protectionMode === 'passphrase';
 
-    // Seamless background splitting for large files (>1.92 GiB plain, >256 MiB encrypted)
+    // Split plain files over 1,850 MiB and encrypted files over 64 MiB.
     if (shouldSplitUpload(stat.size, isEncrypted)) {
       return await this.performSplitUploadFile({
         filePath: params.filePath,
