@@ -488,9 +488,9 @@ class TelegramDrivePlugin : Plugin() {
                     }
 
                     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                    // Zero-copy fast path for large files (>32 MB): stream directly from content:// URI
-                    // during upload so multi-GB files never duplicate storage or spike RAM.
-                    if (queriedSize > 32L * 1024L * 1024L) {
+                    // Unknown length is not evidence of a small file. Keep the URI
+                    // rather than copying a potentially multi-GB source to cache.
+                    if (queriedSize < 0L || queriedSize > 32L * 1024L * 1024L) {
                         filesArr.put(
                             JSObject().apply {
                                 put("uri", uri.toString())
@@ -549,11 +549,30 @@ class TelegramDrivePlugin : Plugin() {
                             if (afd.length >= 0L) size = afd.length
                         }
                     }
+                    if (size < 0L) {
+                        // Some document providers omit SIZE and descriptor length.
+                        // Count using a small fixed buffer; passing 0 to MTProto
+                        // would otherwise upload an empty/truncated file.
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            val buffer = ByteArray(1024 * 1024)
+                            var counted = 0L
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                if (read > 0) counted += read
+                            }
+                            size = counted
+                        }
+                    }
+                    if (size < 0L) {
+                        call.reject("FILE_SIZE_UNKNOWN")
+                        return@execute
+                    }
                     val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
                     call.resolve(
                         JSObject().apply {
                             put("name", displayName)
-                            put("size", if (size >= 0L) size else 0L)
+                            put("size", size)
                             put("mimeType", mime)
                         }
                     )

@@ -455,11 +455,20 @@ export function useFileUpload(
                     toast.error('Upload rejected by Telegram server size limit (2 GB standard / 4 GB Telegram Premium).');
                 } else if (isAndroidPlatform && isTransientNetworkError(errMsg)) {
                     keepTemporaryFileForResume = true;
+                    // Backend retries have already been exhausted. If the device
+                    // is online, waiting_for_network will never wake up (the
+                    // network state won't change); show an actionable Retry.
+                    const offline = !androidNetworkAvailableRef.current;
                     setUploadQueue(q => q.map(i => i.id === item.id ? {
                         ...i,
-                        status: 'waiting_for_network',
-                        error: 'Waiting for a stable network connection',
+                        status: offline ? 'waiting_for_network' : 'error',
+                        error: offline ? 'Waiting for a network connection' : errMsg,
+                        speedBytesPerSec: 0,
                     } : i));
+                    if (!offline) toast.error(i18n.t('transfer_copy.upload_failed', {
+                        name: (item.url || item.path).split(/[\\/]/).pop(),
+                        error: errMsg,
+                    }));
                 } else {
                     keepTemporaryFileForResume = Boolean(item.tempZipPath || item.androidStaged);
                     const displayPath = item.url || item.path;
