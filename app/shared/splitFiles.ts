@@ -3,12 +3,14 @@ import type { EncryptedFileRecord } from './cryptoVault';
 import { formatByteSize, guessMimeType, type MappedTelegramFile } from './mtprotoHelpers';
 
 /**
- * 1,920 MiB (2,013,265,920 bytes).
- * - Safely under Telegram's 2,000 MiB standard per-message upload limit.
- * - Exact multiple of 1 MiB (1,048,576 B) and 512 KiB (524,288 B), ensuring
- *   MTProto range-download chunk boundaries align cleanly across parts.
+ * 1,850 MiB (1,939,865,600 bytes) per unencrypted Telegram message.
+ * - Below a 2,000,000,000-byte per-object limit, with 60,134,400 bytes spare.
+ * - Exact multiple of 1 MiB and 512 KiB so range slices align across parts.
+ * - Existing file manifests carry their original partSize; this constant only
+ *   sets the size of new uploads. In-flight checkpoints with another size
+ *   restart rather than combining incompatible part boundaries.
  */
-export const SPLIT_PART_SIZE_BYTES = 1920 * 1024 * 1024;
+export const SPLIT_PART_SIZE_BYTES = 1850 * 1024 * 1024;
 
 /**
  * Encrypt in 64 MiB pieces rather than buffering a 300–400 MB file (or
