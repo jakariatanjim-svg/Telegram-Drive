@@ -3051,33 +3051,102 @@ class AndroidWebEngine {
         return null;
 
       case 'cmd_upload_from_url': {
-        const rawUrl = String(args.url ?? '').trim();
-        const folderId =
-          args.folderId === null || args.folderId === undefined ? null : Number(args.folderId);
-        const transferId = String(args.id ?? `url_${Date.now()}`);
-        const res = await fetch(rawUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const bytes = new Uint8Array(await res.arrayBuffer());
-        const guessedName =
-          String(args.filename ?? '').trim() ||
-          decodeURIComponent(new URL(rawUrl).pathname.split('/').pop() || '') ||
-          `remote_${Date.now()}`;
+        const req = (args.req as Record<string, unknown> | undefined) ?? args;
+        const rawUrl = String(req.url ?? args.url ?? '').trim();
+        const url = new URL(rawUrl);
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Only HTTP/HTTPS URLs are supported.');
+        const folderId = req.folder_id === null || req.folder_id === undefined
+          ? args.folderId === null || args.folderId === undefined ? null : Number(args.folderId)
+          : Number(req.folder_id);
+        const transferId = String(req.id ?? args.id ?? args.transferId ?? `url_${Date.now()}`);
+        // A URL must never bypass the protection selected in the upload dialog.
+        const protection = String(req.protection_mode ?? args.protectionMode ?? 'standard');
+        if (protection !== 'standard') throw new Error('PROTECTED_URL_UPLOAD_UNAVAILABLE: Download the file first, then upload it with the chosen protection.');
+        const guessedName = String(req.filename ?? args.filename ?? '').trim()
+          || url.pathname.split('/').pop() || `remote_${Date.now()}`;
         const client = await this.ensureClient();
-        const sent = await client.sendMedia(folderIdToPeer(folderId), {
-          type: 'document',
-          file: bytes,
-          fileName: guessedName,
-          fileMime: res.headers.get('content-type') || guessMimeType(guessedName),
-        });
-        this.state.bandwidth.uploaded += bytes.byteLength;
-        this.saveState();
-        dispatchLocalEvent('remote-upload-progress', {
-          id: transferId,
-          progress: 100,
-          downloaded_bytes: bytes.byteLength,
-          total_bytes: bytes.byteLength,
-        });
-        return sent.id;
+        const abort = new AbortController();
+        this.activeAborts.set(transferId, abort);
+        this.explicitlyCancelledTransfers.delete(transferId);
+        try {
+          const result = await this.runWithTransientRetry(transferId, abort.signal, () =>
+            withUploadLiveness(abort.signal, async (signal, activity) => {
+              const res = await fetch(url, { signal });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              if (!res.body) throw new Error('URL_DOWNLOAD_EMPTY');
+              const mime = res.headers.get('content-type') || guessMimeType(guessedName);
+              const declaredSize = Number(res.headers.get('content-length'));
+              if (declaredSize > SPLIT_PART_SIZE_BYTES) {
+                throw new Error('URL_UPLOAD_TOO_LARGE: Download the file first, then upload it from your device.');
+              }
+              let source: Uint8Array | ReadableStream<Uint8Array>;
+              let size: number;
+              if (declaredSize > 0 && !res.headers.get('content-encoding')) {
+                source = res.body;
+                size = declaredSize;
+              } else {
+                // Unknown or compressed length: cap buffering to avoid Android OOM.
+                const chunks: Uint8Array[] = [];
+                let count = 0;
+                const reader = res.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  count += value.byteLength;
+                  if (count > 64 * 1024 * 1024) {
+                    await reader.cancel();
+                    throw new Error('URL_SIZE_UNKNOWN: Download this large file first, then upload it from your device.');
+                  }
+                  chunks.push(value);
+                  activity();
+                }
+                const bytes = new Uint8Array(count);
+                let offset = 0;
+                for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+                source = bytes;
+                size = count;
+              }
+              dispatchLocalEvent('remote-upload-progress', {
+                id: transferId,
+                phase: 'uploading',
+                percent: 0,
+                speed: 0,
+                uploaded_bytes: 0,
+                total_bytes: size,
+              });
+              const uploaded = await client.uploadFile({
+                file: source as unknown as Parameters<TelegramClient['uploadFile']>[0]['file'],
+                fileName: guessedName,
+                fileSize: size,
+                fileMime: mime,
+                abortSignal: signal,
+                progressCallback: (done, total) => {
+                  if (!activity()) return;
+                  dispatchLocalEvent('upload-progress', {
+                    id: transferId,
+                    progress: total > 0 ? Math.min(99, Math.round((done / total) * 100)) : 0,
+                    uploaded_bytes: done,
+                    total_bytes: total || size,
+                    speed_bytes_per_sec: 0,
+                  });
+                },
+              });
+              return { uploaded, size };
+            }),
+          );
+          if (abort.signal.aborted) throw new Error('ABORTED');
+          const sent = await withUploadFinalizationDeadline(() => client.sendMedia(folderIdToPeer(folderId), {
+            type: 'document',
+            file: result.uploaded,
+            fileName: guessedName,
+          }));
+          this.state.bandwidth.uploaded += result.size;
+          this.saveState();
+          return sent.id;
+        } finally {
+          this.activeAborts.delete(transferId);
+          this.explicitlyCancelledTransfers.delete(transferId);
+        }
       }
 
       case 'cmd_storage_clear':

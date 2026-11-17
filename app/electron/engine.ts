@@ -2,6 +2,8 @@ import nodeCrypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { app, shell } from 'electron';
 import {
   MemoryStorage,
@@ -1777,9 +1779,20 @@ export class DesktopEngine {
           }
           const resp = await fetch(job.url, { signal: abort.signal });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const buf = Buffer.from(await resp.arrayBuffer());
-          localPath = path.join(getPortablePaths().stagingCacheDir, `${job.id}_${job.filename}`);
-          fs.writeFileSync(localPath, buf);
+          if (!resp.body) throw new Error('URL_DOWNLOAD_EMPTY');
+          localPath = path.join(getPortablePaths().stagingCacheDir, `${job.id}_${path.basename(job.filename)}`);
+          try {
+            // Stream to portable staging instead of keeping a 300 MB+ HTTP
+            // response (or a multi-GB file) in renderer/main-process RAM.
+            await pipeline(
+              Readable.fromWeb(resp.body as unknown as import('node:stream/web').ReadableStream),
+              fs.createWriteStream(localPath),
+              { signal: abort.signal },
+            );
+          } catch (error) {
+            fs.rmSync(localPath, { force: true });
+            throw error;
+          }
           cleanupTmp = true;
         }
         if (!localPath || !fs.existsSync(localPath)) {
@@ -2923,21 +2936,33 @@ export class DesktopEngine {
           String(req.filename ?? args.filename ?? '') ||
           path.basename(parsed.pathname) ||
           `remote_${Date.now()}.bin`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const tmpFile = path.join(getPortablePaths().stagingCacheDir, `${Date.now()}_${filename}`);
-        fs.writeFileSync(tmpFile, Buffer.from(await resp.arrayBuffer()));
         const transferId = String(req.id ?? args.id ?? args.transferId ?? `url_${Date.now()}`);
+        const tmpFile = path.join(getPortablePaths().stagingCacheDir, `${transferId}_${path.basename(filename)}`);
+        const abort = new AbortController();
+        this.activeAbortControllers.set(transferId, abort);
         this.directActiveDirections.set(transferId, 'upload');
         try {
+          const resp = await fetch(url, { signal: abort.signal });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          if (!resp.body) throw new Error('URL_DOWNLOAD_EMPTY');
+          await pipeline(
+            Readable.fromWeb(resp.body as unknown as import('node:stream/web').ReadableStream),
+            fs.createWriteStream(tmpFile),
+            { signal: abort.signal },
+          );
           return await this.performUploadFile({
             filePath: tmpFile,
             fileName: filename,
             folderId:
               req.folder_id === null || req.folder_id === undefined ? null : Number(req.folder_id),
             transferId,
+            protectionMode: (req.protection_mode ?? args.protectionMode) as string | undefined,
+            promptToken: (req.prompt_token ?? args.promptToken) as number | undefined,
+            protectMetadata: Boolean(req.protect_metadata ?? args.protectMetadata),
+            signal: abort.signal,
           });
         } finally {
+          this.activeAbortControllers.delete(transferId);
           this.directActiveDirections.delete(transferId);
           fs.rmSync(tmpFile, { force: true });
         }

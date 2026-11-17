@@ -55,7 +55,9 @@ export async function open(options: OpenDialogOptions = {}): Promise<string | st
         return;
       }
       const pseudoPaths = files.map(file => {
-        const key = `/picked/${Date.now()}_${file.name}`;
+        // Distinct files may share a name in the same picker batch; a timestamp
+        // alone would overwrite the first File in pendingFilesByPath.
+        const key = `/picked/${crypto.randomUUID()}_${file.name}`;
         androidEngine.registerBrowserSelectedFile(key, file);
         return key;
       });
