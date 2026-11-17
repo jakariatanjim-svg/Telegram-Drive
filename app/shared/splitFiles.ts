@@ -11,10 +11,10 @@ import { formatByteSize, guessMimeType, type MappedTelegramFile } from './mtprot
 export const SPLIT_PART_SIZE_BYTES = 1920 * 1024 * 1024;
 
 /**
- * Smaller 256 MiB chunk size when Vault/Passphrase encryption is enabled on a
- * multi-GB file so encryption buffers stay comfortably inside memory limits.
+ * Encrypt in 64 MiB pieces rather than buffering a 300–400 MB file (or
+ * multiple 256 MiB copies) in memory while an upload is running.
  */
-export const ENCRYPTED_SPLIT_PART_SIZE_BYTES = 256 * 1024 * 1024;
+export const ENCRYPTED_SPLIT_PART_SIZE_BYTES = 64 * 1024 * 1024;
 
 export const SPLIT_PART_MARKER = '#TG_SPLIT_PART_V1:';
 export const SPLIT_MANIFEST_MARKER = '#TG_SPLIT_MANIFEST_V1:';

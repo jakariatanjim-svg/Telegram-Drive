@@ -60,6 +60,7 @@ import {
 import { checkGithubUpdate, downloadAndInstallWindowsUpdate } from './updater';
 import { runRobustQrSignIn } from '../shared/qrAuthLoop';
 import { mintDeviceLinkBundle, unpackDeviceLinkToken } from '../shared/deviceLink';
+import { withUploadLiveness, withUploadFinalizationDeadline } from '../shared/uploadLiveness';
 import {
   ENCRYPTED_SPLIT_PART_SIZE_BYTES,
   SPLIT_PART_SIZE_BYTES,
@@ -280,7 +281,7 @@ function isPeerCacheMissError(err: unknown): boolean {
 
 function isTransientTransferNetworkError(err: unknown): boolean {
   const text = err instanceof Error ? `${err.name} ${err.message}` : String(err);
-  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UND_ERR|FETCH_FAILED|socket hang up|network|TIMEOUT|FLOOD_WAIT/i.test(
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|ENETUNREACH|EHOSTUNREACH|UPLOAD_STALLED|UND_ERR|FETCH_FAILED|socket hang up|network|TIMEOUT|FLOOD_WAIT/i.test(
     text,
   );
 }
@@ -571,7 +572,7 @@ export class DesktopEngine {
     const countedIds = new Set<string>();
 
     for (const job of this.transfers.values()) {
-      if (job.direction === 'upload' && ['uploading', 'encrypting'].includes(job.status)) {
+      if (job.direction === 'upload' && ['uploading', 'encrypting', 'verifying'].includes(job.status)) {
         activeUploads++;
         countedIds.add(job.id);
       } else if (job.direction === 'download' && ['downloading', 'decrypting'].includes(job.status)) {
@@ -1135,9 +1136,11 @@ export class DesktopEngine {
       const aliveIds = new Set<number>();
       for (let i = 0; i < checkIds.length; i += 100) {
         const batch = checkIds.slice(i, i + 100);
+        // An unavailable network is not proof that a completed part vanished.
+        // Preserve the checkpoint and let the transfer retry instead.
         const existingMsgs = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
           c.getMessages(p, batch),
-        ).catch(() => []);
+        );
         for (const m of existingMsgs) {
           if (m && m.media) aliveIds.add(m.id);
         }
@@ -1195,7 +1198,7 @@ export class DesktopEngine {
           let readSoFar = 0;
           while (readSoFar < item.size) {
             const r = fs.readSync(fd, sliceBuf, readSoFar, item.size - readSoFar, item.offset + readSoFar);
-            if (r <= 0) break;
+            if (r <= 0) throw new Error('SOURCE_FILE_CHANGED: Source ended before upload was complete.');
             readSoFar += r;
           }
         } finally {
@@ -1211,13 +1214,14 @@ export class DesktopEngine {
         vaultId = enc.vaultId;
         partUploadBytes = enc.ciphertext.byteLength;
 
-        uploadedPartFile = await client.uploadFile({
+        uploadedPartFile = await withUploadLiveness(params.signal, (signal, activity) => client.uploadFile({
           file: enc.ciphertext,
           fileName: partFileName,
           fileSize: partUploadBytes,
           fileMime: 'application/octet-stream',
-          abortSignal: params.signal,
+          abortSignal: signal,
           progressCallback: (done, tot) => {
+            if (!activity()) return;
             const ratio = tot > 0 ? done / tot : 0;
             const overallDone = Math.min(
               params.totalSourceBytes,
@@ -1236,20 +1240,20 @@ export class DesktopEngine {
               speed_bytes_per_sec: speed,
             });
           },
-        });
+        }));
       } else {
-        const readStream = fs.createReadStream(params.filePath, {
-          start: item.offset,
-          end: item.offset + item.size - 1,
-          highWaterMark: 1024 * 1024,
-        });
-        uploadedPartFile = await client.uploadFile({
-          file: readStream,
+        uploadedPartFile = await withUploadLiveness(params.signal, (signal, activity) => client.uploadFile({
+          file: fs.createReadStream(params.filePath, {
+            start: item.offset,
+            end: item.offset + item.size - 1,
+            highWaterMark: 1024 * 1024,
+          }),
           fileName: partFileName,
           fileSize: item.size,
           fileMime: 'application/octet-stream',
-          abortSignal: params.signal,
+          abortSignal: signal,
           progressCallback: done => {
+            if (!activity()) return;
             const overallDone = Math.min(params.totalSourceBytes, completedPlainBytes + done);
             const newlyTransferred = Math.max(0, overallDone - initialResumedBytes);
             const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
@@ -1264,18 +1268,19 @@ export class DesktopEngine {
               speed_bytes_per_sec: speed,
             });
           },
-        });
+        }));
       }
 
+      if (params.signal?.aborted) throw new Error('CANCELLED');
       const partCaption = buildSplitPartCaption(checkpoint.groupId, item.index, plan.length, partUploadBytes);
-      const sentPart = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+      const sentPart = await withUploadFinalizationDeadline(() => this.withResolvedFolderPeer(params.folderId, (c, p) =>
         c.sendMedia(p, {
           type: 'document',
           file: uploadedPartFile,
           fileName: partFileName,
           caption: partCaption,
         }),
-      );
+      ));
 
       this.db.bandwidth.uploaded += partUploadBytes;
       checkpoint.completedParts[item.index] = {
@@ -1319,22 +1324,23 @@ export class DesktopEngine {
 
     const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
     const manifestFileName = buildSplitManifestFileName(checkpoint.groupId);
-    const uploadedManifest = await client.uploadFile({
+    const uploadedManifest = await withUploadLiveness(params.signal, (signal) => client.uploadFile({
       file: manifestBytes,
       fileName: manifestFileName,
       fileSize: manifestBytes.byteLength,
       fileMime: 'application/json',
-      abortSignal: params.signal,
-    });
+      abortSignal: signal,
+    }));
 
-    const sentManifest = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+    if (params.signal?.aborted) throw new Error('CANCELLED');
+    const sentManifest = await withUploadFinalizationDeadline(() => this.withResolvedFolderPeer(params.folderId, (c, p) =>
       c.sendMedia(p, {
         type: 'document',
         file: uploadedManifest,
         fileName: manifestFileName,
         caption: buildSplitManifestCaption(manifest),
       }),
-    );
+    ));
 
     const manifestKey = fileCompositeKey(params.folderId, sentManifest.id);
     this.db.splitManifests[manifestKey] = manifest;
@@ -1374,6 +1380,7 @@ export class DesktopEngine {
     videoFilenameCaption?: boolean;
     signal?: AbortSignal;
     onProgress?: (uploaded: number, total: number, speed: number) => void;
+    onFinalizing?: () => void;
   }): Promise<number> {
     const client = await this.ensureClient();
     const stat = fs.statSync(params.filePath);
@@ -1422,13 +1429,14 @@ export class DesktopEngine {
     }
 
     const startedAt = Date.now();
-    const uploaded = await client.uploadFile({
+    const uploaded = await withUploadLiveness(params.signal, (signal, activity) => client.uploadFile({
       file: uploadSource,
       fileName: uploadName,
       fileSize: totalBytes,
       fileMime: isEncrypted ? 'application/octet-stream' : originalMime,
-      abortSignal: params.signal,
+      abortSignal: signal,
       progressCallback: (done, tot) => {
+        if (!activity()) return;
         const elapsedSec = Math.max(0.1, (Date.now() - startedAt) / 1000);
         const speed = Math.round(done / elapsedSec);
         const pct = tot > 0 ? Math.min(99, Math.round((done / tot) * 100)) : 0;
@@ -1441,7 +1449,7 @@ export class DesktopEngine {
           speed_bytes_per_sec: speed,
         });
       },
-    });
+    }));
 
     const isStreamableVideo =
       !isEncrypted &&
@@ -1451,7 +1459,9 @@ export class DesktopEngine {
     const caption =
       isStreamableVideo && params.videoFilenameCaption === false ? '' : isEncrypted && params.protectMetadata ? '' : originalName;
 
-    const sent = await this.withResolvedFolderPeer(params.folderId, (c, p) =>
+    if (params.signal?.aborted) throw new Error('CANCELLED');
+    params.onFinalizing?.();
+    const sent = await withUploadFinalizationDeadline(() => this.withResolvedFolderPeer(params.folderId, (c, p) =>
       c.sendMedia(
         p,
         isStreamableVideo
@@ -1469,7 +1479,7 @@ export class DesktopEngine {
               caption,
             },
       ),
-    );
+    ));
 
     this.db.bandwidth.uploaded += totalBytes;
 
@@ -1711,7 +1721,7 @@ export class DesktopEngine {
   private pumpTransferQueue(): void {
     const jobs = [...this.transfers.values()].sort((a, b) => a.queuePosition - b.queuePosition);
     const activeUploads = jobs.filter(
-      j => j.direction === 'upload' && ['uploading', 'encrypting'].includes(j.status),
+      j => j.direction === 'upload' && ['uploading', 'encrypting', 'verifying'].includes(j.status),
     ).length;
     const activeDownloads = jobs.filter(
       j => j.direction === 'download' && ['downloading', 'decrypting'].includes(j.status),
@@ -1782,6 +1792,11 @@ export class DesktopEngine {
             videoUploadMode: job.videoUploadMode,
             videoFilenameCaption: job.videoFilenameCaption,
             signal: abort.signal,
+            onFinalizing: () => this.updateTransferJob(job, {
+              status: 'verifying',
+              progress: 99,
+              speedBytesPerSec: 0,
+            }),
             onProgress: (done, tot, speed) => {
               this.updateTransferJob(job, {
                 transferredBytes: done,
@@ -1800,7 +1815,11 @@ export class DesktopEngine {
           });
         } finally {
           if (cleanupTmp && localPath) fs.rmSync(localPath, { force: true });
-          if (job.tempZipPath) fs.rmSync(job.tempZipPath, { force: true });
+          // Keep folder ZIPs when the upload fails or auto-retries; deleting the
+          // source here made every retry fail with SOURCE_FILE_NOT_FOUND.
+          if (job.tempZipPath && ['completed', 'cancelled'].includes(job.status)) {
+            fs.rmSync(job.tempZipPath, { force: true });
+          }
         }
       } else {
         const defaultDownloads = path.join(os.homedir(), 'Downloads', job.filename);
@@ -1853,6 +1872,8 @@ export class DesktopEngine {
             error: `Network interrupted — auto-resuming in ${Math.round(delayMs / 1000)}s…`,
             errorCategory: 'network',
             retryAt: Date.now() + delayMs,
+            progress: 0,
+            transferredBytes: 0,
             speedBytesPerSec: 0,
           });
           setTimeout(() => {
@@ -2841,7 +2862,16 @@ export class DesktopEngine {
             rejected.push(p);
           }
         }
-        return { files, folders, rejected };
+        // The drop handler expects accepted paths and structured rejections.
+        // Returning { files, folders } left validation.accepted undefined, so
+        // every OS drop displayed the overlay but never entered the upload queue.
+        return {
+          accepted: files,
+          rejected: [
+            ...folders.map(p => ({ path: p, reason: 'directory' as const })),
+            ...rejected.map(p => ({ path: p, reason: 'unreadable' as const })),
+          ],
+        };
       }
 
       // ── Direct Upload / Download & Desktop Transfer Queue ──────────
