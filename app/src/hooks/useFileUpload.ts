@@ -33,7 +33,8 @@ import {
 
 interface ProgressPayload {
     id: string;
-    percent: number;
+    progress?: number;
+    percent?: number;
     uploaded_bytes: number;
     total_bytes: number;
     speed_bytes_per_sec: number;
@@ -96,7 +97,7 @@ export function useFileUpload(
             setUploadQueue(q => q.map(i =>
                 i.id === event.payload.id && runningItemsRef.current.get(i.id)?.() ? {
                     ...i,
-                    progress: event.payload.percent,
+                    progress: event.payload.progress ?? event.payload.percent ?? i.progress,
                     uploadedBytes: event.payload.uploaded_bytes,
                     totalBytes: event.payload.total_bytes,
                     speedBytesPerSec: event.payload.speed_bytes_per_sec,

@@ -486,7 +486,7 @@ export function EncryptionSettingsSection({ vaultOnly = false }: { vaultOnly?: b
                             <option value="standard">{t('settings.encryption_mode_standard')}</option>
                             <option value="vault">{t('settings.encryption_mode_vault')}</option>
                             <option value="passphrase">{t('settings.encryption_mode_passphrase')}</option>
-                            <option value="vault_and_passphrase">{t('settings.encryption_mode_vault_and_passphrase')}</option>
+                            <option value="vault_and_passphrase" disabled>{t('settings.encryption_mode_vault_and_passphrase')} (Not yet supported)</option>
                         </select>
                     } />
                     <SettingsRow icon={<EyeOff className="h-4 w-4" />} title={t('settings.protect_metadata')} description={t('settings.protect_metadata_desc')} control={<SettingsToggle checked={settings.encryptionProtectMetadata} label={t('settings.protect_metadata')} onChange={() => updateSetting('encryptionProtectMetadata', !settings.encryptionProtectMetadata)} />} />

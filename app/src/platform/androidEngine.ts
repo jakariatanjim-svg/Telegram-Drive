@@ -994,7 +994,11 @@ class AndroidWebEngine {
     });
 
     const t0 = Date.now();
-    let vaultId: string | undefined;
+    // On a fully resumed vault upload there may be no new part to encrypt;
+    // keep the vault identity in the final manifest/record nonetheless.
+    let vaultId: string | undefined = isEncrypted && protectionMode !== 'passphrase'
+      ? this.vault.getStatus().vault_id ?? undefined
+      : undefined;
 
     for (const plan of partPlans) {
       if (abort.signal.aborted) throw new Error('ABORTED');
@@ -2305,6 +2309,10 @@ class AndroidWebEngine {
 
         try {
           const protectionMode = (req.protection_mode ?? args.protectionMode) as string | undefined;
+          // Fail closed: combined/unknown protection has no supported file format.
+          if (protectionMode && !['standard', 'vault', 'passphrase'].includes(protectionMode)) {
+            throw new Error('UNSUPPORTED_PROTECTION_MODE: This protection mode cannot safely upload files yet. Choose Standard, Vault, or Passphrase.');
+          }
           const isEncrypted = protectionMode === 'vault' || protectionMode === 'passphrase';
           const promptToken = (req.prompt_token ?? args.promptToken) as number | undefined;
           const protectMetadata = Boolean(req.protect_metadata ?? args.protectMetadata);

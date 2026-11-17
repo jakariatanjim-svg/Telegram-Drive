@@ -64,6 +64,12 @@ export async function withUploadFinalizationDeadline<T>(send: () => Promise<T>):
     ]);
   } catch (error) {
     if (error instanceof UploadFinalizationError) throw error;
+    // Explicit server rejections are definitive (the file was not posted).
+    // Preserve their useful error text instead of labeling them uncertain.
+    const message = error instanceof Error ? error.message : String(error);
+    if (/FILE_TOO_BIG|FILE_PARTS_INVALID|FILE_INVALID|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL/i.test(message)) {
+      throw error;
+    }
     throw new UploadFinalizationError(error);
   } finally {
     if (timer) clearTimeout(timer);
