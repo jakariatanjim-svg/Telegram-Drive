@@ -1387,6 +1387,11 @@ export class DesktopEngine {
     const originalName = params.fileName || path.basename(params.filePath);
     const originalMime = guessMimeType(originalName);
 
+    // The current file format only implements vault OR passphrase encryption.
+    // Never silently upload plaintext when a combined/unknown mode is requested.
+    if (params.protectionMode && !['standard', 'vault', 'passphrase'].includes(params.protectionMode)) {
+      throw new Error('UNSUPPORTED_PROTECTION_MODE: This protection mode cannot safely upload files yet. Choose Standard, Vault, or Passphrase.');
+    }
     const isEncrypted =
       params.protectionMode === 'vault' || params.protectionMode === 'passphrase';
 
